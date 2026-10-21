@@ -81,7 +81,10 @@ func (s *Server) startRainLogin(w http.ResponseWriter, r *http.Request) {
 		defer waitCancel()
 		cookie, err := flow.wait(waitCtx)
 		if err == nil {
-			err = s.newRain(cookie).Validate(waitCtx)
+			adapter := s.newRain(cookie)
+			if err = adapter.Validate(waitCtx); err == nil {
+				cookie, err = sessionCredentials(adapter, cookie)
+			}
 		}
 		s.rainMu.Lock()
 		if generation != s.rainGeneration {

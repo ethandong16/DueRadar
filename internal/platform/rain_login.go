@@ -7,9 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
-	"net/url"
-	"strings"
+	"sync"
 	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -22,11 +20,12 @@ type RainLogin struct {
 	base   string
 	token  string
 	Image  []byte
+	jar    *rainCookieJar
+	once   sync.Once
 }
 
 func StartRainLogin(ctx context.Context) (*RainLogin, error) {
-	jar, _ := cookiejar.New(nil)
-	l := &RainLogin{client: &http.Client{Jar: jar, Timeout: 185 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, base: "https://www.yuketang.cn"}
+	l := &RainLogin{client: &http.Client{Timeout: 185 * time.Second}, base: rainOrigin}
 	var response struct {
 		Code *int `json:"code"`
 		Data struct {
@@ -50,6 +49,12 @@ func StartRainLogin(ctx context.Context) (*RainLogin, error) {
 }
 
 func (l *RainLogin) request(ctx context.Context, method, path string, body any, out any) error {
+	if l.base != rainOrigin {
+		return errors.New("雨课堂登录请求地址无效")
+	}
+	if err := l.ensureSession(); err != nil {
+		return err
+	}
 	var data io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -69,6 +74,7 @@ func (l *RainLogin) request(ctx context.Context, method, path string, body any, 
 	for _, cookie := range l.client.Jar.Cookies(req.URL) {
 		if cookie.Name == "csrftoken" {
 			req.Header.Set("X-CSRFToken", cookie.Value)
+			break
 		}
 	}
 	r, err := l.client.Do(req)
@@ -79,6 +85,9 @@ func (l *RainLogin) request(ctx context.Context, method, path string, body any, 
 		return errors.New("雨课堂登录连接失败或二维码已过期")
 	}
 	defer r.Body.Close()
+	if err := l.jar.check(); err != nil {
+		return err
+	}
 	if r.StatusCode != 200 {
 		return errors.New("雨课堂登录服务未接受请求")
 	}
@@ -125,13 +134,12 @@ func (l *RainLogin) Wait(ctx context.Context) (string, error) {
 			return "", errors.New("雨课堂未确认网页登录会话")
 		}
 	}
-	u, _ := url.Parse(l.base + "/")
-	parts := []string{}
-	for _, c := range l.client.Jar.Cookies(u) {
-		parts = append(parts, c.Name+"="+c.Value)
+	session, err := l.jar.snapshot()
+	if err != nil {
+		return "", err
 	}
-	if len(parts) == 0 {
+	if len(session.Cookies) == 0 {
 		return "", errors.New("登录响应未建立可复用会话")
 	}
-	return strings.Join(parts, "; "), nil
+	return encodeRainSession(session)
 }

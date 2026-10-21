@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethandong16/due-radar/internal/core"
@@ -24,12 +25,15 @@ type Rain struct {
 	cookie  string
 	baseURL string
 	client  *http.Client
+	jar     *rainCookieJar
+	once    sync.Once
+	initErr error
 }
 
 func NewRain(cookie string) *Rain {
 	return &Rain{
 		cookie:  strings.TrimSpace(cookie),
-		baseURL: "https://www.yuketang.cn",
+		baseURL: rainOrigin,
 		client: &http.Client{
 			Timeout: 20 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -443,17 +447,20 @@ func (r *Rain) get(ctx context.Context, path string) (rainEnvelope, error) {
 
 func (r *Rain) request(ctx context.Context, method, path, classroomID string, body io.Reader) (rainEnvelope, error) {
 	var env rainEnvelope
-	if r.cookie == "" {
-		return env, ErrSessionExpired
+	if r.baseURL != rainOrigin {
+		return env, errors.New("雨课堂请求地址无效")
 	}
-	if len(r.cookie) > 32768 || strings.ContainsAny(r.cookie, "\r\n") {
-		return env, errors.New("雨课堂会话格式无效")
+	if err := r.ensureSession(); err != nil {
+		return env, err
 	}
 	req, err := http.NewRequestWithContext(ctx, method, r.baseURL+path, body)
 	if err != nil {
 		return env, errors.New("雨课堂请求初始化失败")
 	}
-	req.Header.Set("Cookie", r.cookie)
+	cookies := r.jar.Cookies(req.URL)
+	if len(cookies) == 0 {
+		return env, ErrSessionExpired
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("xtbz", "ykt")
 	req.Header.Set("uv-id", "0")
@@ -463,9 +470,10 @@ func (r *Rain) request(ctx context.Context, method, path, classroomID string, bo
 	}
 	if method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/json")
-		for _, cookie := range req.Cookies() {
+		for _, cookie := range cookies {
 			if cookie.Name == "csrftoken" {
 				req.Header.Set("X-CSRFToken", cookie.Value)
+				break
 			}
 		}
 	}
@@ -479,6 +487,9 @@ func (r *Rain) request(ctx context.Context, method, path, classroomID string, bo
 		return env, errors.New("雨课堂网络请求失败")
 	}
 	defer resp.Body.Close()
+	if err := r.jar.check(); err != nil {
+		return env, err
+	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		return env, ErrSessionExpired
 	}

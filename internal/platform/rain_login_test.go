@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -34,25 +33,33 @@ func TestQRLoginEstablishesIndependentSession(t *testing.T) {
 			confirmed = true
 			http.SetCookie(w, &http.Cookie{Name: "sessionid", Value: "fixture-session", Path: "/", HttpOnly: true})
 			w.Write([]byte(`{"success":true}`))
+		case "/api/v3/user/basic-info":
+			if cookie, err := r.Cookie("sessionid"); err != nil || cookie.Value != "fixture-session" {
+				t.Error("independent validator did not receive QR session")
+			}
+			w.Write([]byte(`{"code":0,"data":{"id":123}}`))
 		default:
 			t.Error("unexpected endpoint")
 			http.NotFound(w, r)
 		}
 	}))
 	defer srv.Close()
-	jar, _ := cookiejar.New(nil)
-	flow := &RainLogin{base: srv.URL, client: &http.Client{Jar: jar}, token: "fixture-token"}
+	flow := &RainLogin{base: rainOrigin, client: &http.Client{Transport: rainLocalTransport(srv.URL)}, token: "fixture-token"}
 	cookie, err := flow.Wait(context.Background())
-	if err != nil || !confirmed || !strings.Contains(cookie, "sessionid=fixture-session") {
+	if err != nil || !confirmed || !json.Valid([]byte(cookie)) {
 		t.Fatal("login confirmation failed", err)
+	}
+	adapter := NewRain(cookie)
+	adapter.client.Transport = rainLocalTransport(srv.URL)
+	if err := adapter.Validate(context.Background()); err != nil {
+		t.Fatal("exported QR session failed independent validation", err)
 	}
 }
 
 func TestQRLoginRejectsMissingSessionAndRefusedLogin(t *testing.T) {
 	for _, body := range []string{`{"code":1,"data":{}}`, `{"code":0,"data":{}}`} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) }))
-		jar, _ := cookiejar.New(nil)
-		flow := &RainLogin{base: srv.URL, client: &http.Client{Jar: jar}, token: "fixture-token"}
+		flow := &RainLogin{base: rainOrigin, client: &http.Client{Transport: rainLocalTransport(srv.URL)}, token: "fixture-token"}
 		_, err := flow.Wait(context.Background())
 		srv.Close()
 		if err == nil {
@@ -70,8 +77,7 @@ func TestRainQRRejectsMissingSuccessCode(t *testing.T) {
 		w.Write([]byte(`{"data":{}}`))
 	}))
 	defer srv.Close()
-	jar, _ := cookiejar.New(nil)
-	flow := &RainLogin{base: srv.URL, client: &http.Client{Jar: jar}, token: "fixture-token"}
+	flow := &RainLogin{base: rainOrigin, client: &http.Client{Transport: rainLocalTransport(srv.URL)}, token: "fixture-token"}
 	if _, err := flow.Wait(context.Background()); err == nil {
 		t.Fatal("cookie alone treated as a successful login")
 	}

@@ -448,7 +448,53 @@ func (s *Server) syncRain(ctx context.Context) error {
 		_ = s.failRainSync(ctx, generation, errors.Is(err, platform.ErrSessionExpired), "任务采集失败")
 		return err
 	}
-	return s.commitRainSync(ctx, generation, func() error { return s.Engine.Sync(core.PlatformRain, tasks, time.Now()) })
+	updated, err := sessionCredentials(adapter, cookie)
+	if err != nil {
+		_ = s.failRainSync(ctx, generation, false, "会话续期读取失败")
+		return err
+	}
+	// Keep the generation lock across both writes. Even an unchanged export
+	// must still belong to the stored session before its tasks can be accepted.
+	err = s.commitRainSync(ctx, generation, func() error {
+		if s.Vault.Get().RainCookie != cookie {
+			return errSupersededLogin
+		}
+		if updated != cookie {
+			if err := s.Vault.Update(func(c *vault.Config) error {
+				if c.RainCookie != cookie {
+					return errSupersededLogin
+				}
+				c.RainCookie = updated
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Preserve valid renewed credentials if the task-state disk write fails;
+		// restoring the old session could discard a platform-issued rotation.
+		return s.Engine.Sync(core.PlatformRain, tasks, time.Now())
+	})
+	if err != nil && !errors.Is(err, errSupersededLogin) {
+		_ = s.failRainSync(ctx, generation, false, "同步结果保存失败")
+	}
+	return err
+}
+
+// Export is optional for adapters without renewable sessions. Provider errors
+// may contain cookies or signed URLs and must never escape to API callers.
+func sessionCredentials(adapter rainAdapter, original string) (string, error) {
+	exporter, ok := adapter.(interface{ Credentials() (string, error) })
+	if !ok {
+		return original, nil
+	}
+	updated, err := exporter.Credentials()
+	if err != nil || strings.TrimSpace(updated) == "" {
+		return "", errors.New("平台会话续期读取失败")
+	}
+	return updated, nil
 }
 
 func (s *Server) Deliver(ctx context.Context) {

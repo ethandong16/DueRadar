@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -17,8 +18,19 @@ func rainTestClient(t *testing.T, handle http.HandlerFunc) *Rain {
 	s := httptest.NewServer(handle)
 	t.Cleanup(s.Close)
 	r := NewRain("sessionid=test-only-session")
-	r.baseURL = s.URL
+	r.client.Transport = rainLocalTransport(s.URL)
 	return r
+}
+
+// Keep the production origin and jar scopes intact; only the socket destination
+// is redirected to this test's server by a private transport.
+func rainLocalTransport(serverURL string) http.RoundTripper {
+	target, _ := url.Parse(serverURL)
+	return rainSessionTransport(func(req *http.Request) (*http.Response, error) {
+		copy := req.Clone(req.Context())
+		copy.URL.Scheme, copy.URL.Host = target.Scheme, target.Host
+		return http.DefaultTransport.RoundTrip(copy)
+	})
 }
 
 func TestRainValidateIndependentAuthentication(t *testing.T) {
@@ -168,7 +180,11 @@ func TestRainErrorsDoNotEchoResponseOrCredentials(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("unsafe error: %v", err)
 	}
-	r.cookie += "\r\nInjected: " + secret
+	r = NewRain("sessionid=" + secret + "\r\nInjected: " + secret)
+	r.client.Transport = rainSessionTransport(func(*http.Request) (*http.Response, error) {
+		t.Fatal("invalid credentials reached the network")
+		return nil, nil
+	})
 	err = r.Validate(context.Background())
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("unsafe header error: %v", err)
