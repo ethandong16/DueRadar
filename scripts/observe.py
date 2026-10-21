@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 
@@ -40,18 +41,71 @@ def sample(service, data, binary):
     return row
 
 
+def parse_timestamp(value):
+    # Go emits RFC3339Nano; Python <= 3.10 accepts only 3 or 6 fractional
+    # digits and does not recognize the UTC Z suffix. Preserve microseconds
+    # without rounding a timestamp into the next second.
+    if not isinstance(value, str):
+        raise ValueError("missing timestamp")
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    value = re.sub(r"\.(\d+)(?=[+-]\d{2}:\d{2}$)", lambda match: "." + match.group(1)[:6].ljust(6, "0"), value)
+    result = datetime.datetime.fromisoformat(value)
+    if result.tzinfo is None:
+        raise ValueError("missing timezone")
+    return result
+
+
 def summarize(path):
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not rows:
         return {"samples": 0, "complete": False}
-    start = datetime.datetime.fromisoformat(rows[0]["observed_at"])
-    end = datetime.datetime.fromisoformat(rows[-1]["observed_at"])
+    times = [parse_timestamp(row["observed_at"]) for row in rows]
+    start, end = times[0], times[-1]
+    processes = [row for row in rows if row.get("pid", 0) > 0 and row.get("process_start_ticks") is not None]
+    identities = {(row["pid"], row["process_start_ticks"]) for row in processes}
+    memory = [row["rss_kib"] for row in processes if "rss_kib" in row]
+    platforms = {}
+    successes = collections.defaultdict(set)
+    for observed, row in zip(times, rows):
+        for account in row.get("accounts", []):
+            platform = account.get("platform", "unknown")
+            stats = platforms.setdefault(platform, {
+                "samples": 0, "unbound_samples": 0, "failed_samples": 0,
+                "revalidation_samples": 0, "missing_success_samples": 0,
+                "stale_samples": 0, "max_success_age_seconds": None,
+                "last_success_at": None,
+            })
+            stats["samples"] += 1
+            if account.get("login_state") == "unbound":
+                stats["unbound_samples"] += 1
+                continue
+            stats["failed_samples"] += int(account.get("sync_state") in ("failed", "error", "blocked") or account.get("login_state") in ("expired", "failed") or (account.get("consecutive_failures") or 0) > 0)
+            stats["revalidation_samples"] += int(bool(account.get("needs_revalidation")))
+            try:
+                success = parse_timestamp(account.get("last_success_at"))
+            except (ValueError, TypeError):
+                stats["missing_success_samples"] += 1
+                continue
+            age = max(0, (observed - success).total_seconds())
+            stats["max_success_age_seconds"] = max(stats["max_success_age_seconds"] or 0, age)
+            # Match the application's 30-minute freshness window. A success
+            # label can remain unchanged while synchronization has stalled.
+            stats["stale_samples"] += int(age > 1800)
+            successes[platform].add(success)
+            stats["last_success_at"] = max(successes[platform]).isoformat()
+    for platform, stats in platforms.items():
+        stats["success_timestamps"] = len(successes[platform])
     return {
         "samples": len(rows), "duration_seconds": (end - start).total_seconds(),
+        "covers_24_hours": (end - start).total_seconds() >= 86400,
+        "max_sample_gap_seconds": max(((right - left).total_seconds() for left, right in zip(times, times[1:])), default=0),
         "errors": sum("error" in row for row in rows),
         "max_rss_kib": max((row.get("rss_kib", 0) for row in rows), default=0),
         "max_hwm_kib": max((row.get("hwm_kib", 0) for row in rows), default=0),
-        "process_identities": len({(row.get("pid"), row.get("process_start_ticks")) for row in rows}),
+        "process_identities": len(identities),
+        "rss_change_kib": memory[-1] - memory[0] if memory and len(identities) == 1 else None,
+        "platform_sync": platforms,
         "last": rows[-1],
     }
 

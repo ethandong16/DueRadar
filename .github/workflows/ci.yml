@@ -8,8 +8,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; Node 24
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0; Node 24
         with:
           go-version-file: go.mod
           cache: false
@@ -18,22 +18,23 @@ jobs:
       - run: go test -race -count=1 ./...
       - run: node --check web/app.js
       - run: node --test web/*.test.cjs
+      - run: python3 -m unittest discover -s scripts -p '*_test.py'
       - name: Cross compile Linux targets
         run: |
           mkdir -p dist
           for arch in amd64 arm64 arm; do
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch GOARM=7 go build -trimpath -ldflags="-s -w" -o dist/dueradar-linux-$arch ./cmd/dueradar
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2; Node 24
         with:
           name: dueradar-linux
           path: dist/
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; Node 24
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1; Node 24
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0; Node 24
         with:
           context: .
           push: false

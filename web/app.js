@@ -19,7 +19,8 @@
   let taskPage = 1;
   let toastTimer;
   let authenticated = false;
-  let loading = false;
+  let authGeneration = 0;
+  let refreshJob = null;
   let settingsDirty = false;
   let barkDirty = false;
 
@@ -48,31 +49,41 @@
     toastTimer = setTimeout(() => { $("toast").hidden = true; }, error ? 7000 : 4000);
   }
   function showLogin() {
+    authGeneration++;
     authenticated = false;
+    state = null;
+    settingsDirty = false;
+    barkDirty = false;
+    $("bark-key").value = "";
+    clearActiveLogin();
     $("boot").hidden = true;
     $("app").hidden = true;
     $("login-screen").hidden = false;
   }
   async function api(path, method = "GET", body) {
+    const generation = authGeneration;
+    const stale = () => Object.assign(new Error("会话已切换。"), { name: "StaleSessionError" });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20000);
     try {
       const response = await fetch(path, { method, credentials: "same-origin", cache: "no-store", headers: { ...(method === "GET" ? {} : { "X-DueRadar": "1" }), ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal });
       const contentType = response.headers.get("content-type") || "";
       const result = contentType.includes("application/json") ? await response.json() : { message: (await response.text()).slice(0, 300) };
+      if (generation !== authGeneration) throw stale();
       if (!response.ok) {
         if (response.status === 401 && path !== "/api/login") showLogin();
         throw new Error(result.error || result.message || `请求失败（${response.status}）`);
       }
       return result;
     } catch (error) {
+      if (generation !== authGeneration) throw stale();
       if (error.name === "AbortError") throw new Error("请求超时，请稍后重试。");
       throw error;
     } finally { clearTimeout(timeout); }
   }
   async function busy(button, action) {
     button.disabled = true;
-    try { await action(); } catch (error) { notify(error.message || "操作失败，请稍后重试。", true); }
+    try { await action(); } catch (error) { if (error.name !== "StaleSessionError") notify(error.message || "操作失败，请稍后重试。", true); }
     finally { button.disabled = false; }
   }
   function changeView(view, updateHash = true) {
@@ -170,6 +181,14 @@
     }
   }
   let activeLogin;
+  function clearActiveLogin() {
+    const login = activeLogin;
+    activeLogin = null;
+    if (!login) return;
+    clearTimeout(login.timer);
+    $("rain-qr").removeAttribute("src");
+    if ($("rain-dialog").open) $("rain-dialog").close();
+  }
   async function openRainLogin(id) {
     if (activeLogin) { notify("请先完成或关闭当前扫码绑定。"); return; }
     const login = { path: id === "rain" ? "/api/accounts/rain/login" : "/api/accounts/zhidao/login", timer: null, completed: false };
@@ -179,16 +198,21 @@
     let result;
     try { result = await api(login.path, "POST"); }
     catch (error) {
-      try { await api(`${login.path}/cancel`, "POST"); } catch (_) { /* Keep the original creation error. */ }
+      if (error.name !== "StaleSessionError" && activeLogin === login) {
+        try { await api(`${login.path}/cancel`, "POST"); } catch (_) { /* Keep the original creation error. */ }
+      }
       if (activeLogin === login) activeLogin = null;
       throw error;
     }
+    if (activeLogin !== login) return;
     $("rain-title").textContent = `绑定${label}`;
     $("rain-qr").alt = `${label}官方登录二维码`;
     $("rain-qr").src = result.image;
     $("rain-login-status").textContent = `请使用${scanner}扫码，并在手机上确认登录。二维码约 3 分钟有效。`;
+    login.opened = true;
     $("rain-dialog").showModal();
     async function poll() {
+      if (activeLogin !== login || !$("rain-dialog").open) return;
       try {
         const result = await api(login.path);
         if (activeLogin !== login || !$("rain-dialog").open) return;
@@ -203,7 +227,9 @@
   $("rain-close").addEventListener("click", () => $("rain-dialog").close());
   $("rain-dialog").addEventListener("close", async () => {
     const login = activeLogin;
-    if (!login) return;
+    // Native close events are queued. An old dialog's event must not cancel a
+    // replacement flow that is creating its QR or has already reopened.
+    if (!login || !login.opened || $("rain-dialog").open) return;
     clearTimeout(login.timer);
     $("rain-qr").removeAttribute("src");
     try { if (!login.completed) await api(`${login.path}/cancel`, "POST"); }
@@ -279,25 +305,47 @@
     try { $("today").textContent = new Intl.DateTimeFormat("zh-CN", { dateStyle: "full", timeZone: settings.timezone || "Asia/Shanghai" }).format(new Date()); } catch { $("today").textContent = new Date().toLocaleDateString("zh-CN"); }
     updateFilterTabs(); renderTasks(); renderPlatforms(); renderEvents();
   }
-  async function refreshState(showSuccess = false) {
-    if (loading) return;
-    loading = true;
-    try {
-      // Authenticate before parallel data reads so an expired session has one clear outcome.
-      await api("/api/session");
-      const [tasks, events, accounts, settings, bark, runtime] = await Promise.all([api("/api/tasks"), api("/api/events"), api("/api/accounts"), api("/api/settings"), api("/api/bark"), api("/api/status")]);
-      state = { tasks: (Array.isArray(tasks) ? tasks : []).map((task) => ({ ...task, due_at: task.end_at, last_seen_at: task.last_synced_at })), events: Array.isArray(events) ? events : [], platforms: (Array.isArray(accounts) ? accounts : []).map((account) => ({ ...account, id: account.platform, login_status: account.login_state, sync_status: account.sync_state, last_success: account.last_success_at, failures: account.consecutive_failures, message: account.last_error || account.message })), settings, bark, runtime, demo: Boolean(runtime.demo) };
-      authenticated = true;
-      $("boot").hidden = true; $("login-screen").hidden = true; $("app").hidden = false;
-      $("connection-error").hidden = true;
-      $("service-label").textContent = "管理服务已连接"; $("service-dot").classList.remove("offline");
-      render();
-      if (showSuccess) notify("状态已刷新。");
-    } catch (error) {
-      $("boot").hidden = true;
-      if (!authenticated) { showLogin(); if (!String(error.message).includes("401") && !/unauthorized|未登录|认证|登录/i.test(error.message)) $("login-error").textContent = `连接服务失败：${error.message}`; }
-      else { $("connection-error").textContent = `状态刷新失败：${error.message}。当前显示上次成功读取的数据。`; $("connection-error").hidden = false; $("service-label").textContent = "连接暂时中断"; $("service-dot").classList.add("offline"); }
-    } finally { loading = false; }
+  function refreshState(showSuccess = false) {
+    const generation = authGeneration;
+    if (refreshJob?.generation === generation) {
+      refreshJob.queued = true;
+      refreshJob.showSuccess ||= showSuccess;
+      return refreshJob.promise;
+    }
+    const job = { generation, queued: false, showSuccess, promise: null };
+    refreshJob = job;
+    job.promise = (async () => {
+      try {
+        do {
+          job.queued = false;
+          try {
+            // Authenticate before parallel reads. A queued refresh starts after
+            // this pass, so a save never joins a snapshot taken before its write.
+            await api("/api/session");
+            if (generation !== authGeneration) return false;
+            const [tasks, events, accounts, settings, bark, runtime] = await Promise.all([api("/api/tasks"), api("/api/events"), api("/api/accounts"), api("/api/settings"), api("/api/bark"), api("/api/status")]);
+            if (generation !== authGeneration) return false;
+            if (job.queued) continue;
+            state = { tasks: (Array.isArray(tasks) ? tasks : []).map((task) => ({ ...task, due_at: task.end_at, last_seen_at: task.last_synced_at })), events: Array.isArray(events) ? events : [], platforms: (Array.isArray(accounts) ? accounts : []).map((account) => ({ ...account, id: account.platform, login_status: account.login_state, sync_status: account.sync_state, last_success: account.last_success_at, failures: account.consecutive_failures, message: account.last_error || account.message })), settings, bark, runtime, demo: Boolean(runtime.demo) };
+            authenticated = true;
+            $("boot").hidden = true; $("login-screen").hidden = true; $("app").hidden = false;
+            $("connection-error").hidden = true;
+            $("service-label").textContent = "管理服务已连接"; $("service-dot").classList.remove("offline");
+            render();
+          } catch (error) {
+            if (generation !== authGeneration || error.name === "StaleSessionError") return false;
+            if (job.queued) continue;
+            $("boot").hidden = true;
+            if (!authenticated) { showLogin(); if (!String(error.message).includes("401") && !/unauthorized|未登录|认证|登录/i.test(error.message)) $("login-error").textContent = `连接服务失败：${error.message}`; }
+            else { $("connection-error").textContent = `状态刷新失败：${error.message}。当前显示上次成功读取的数据。`; $("connection-error").hidden = false; $("service-label").textContent = "连接暂时中断"; $("service-dot").classList.add("offline"); }
+            return false;
+          }
+        } while (job.queued);
+        if (job.showSuccess) notify("状态已刷新。");
+        return true;
+      } finally { if (refreshJob === job) refreshJob = null; }
+    })();
+    return job.promise;
   }
   function parseMinutes(id, label) {
     const raw = $(id).value.trim();
@@ -318,19 +366,19 @@
   $("bark-form").addEventListener("input", () => { barkDirty = true; });
   $("login-form").addEventListener("submit", async (event) => {
     event.preventDefault(); const button = event.submitter || $("login-form").querySelector("button"); button.disabled = true; $("login-error").textContent = "";
-    try { await api("/api/login", "POST", { password: $("login-password").value }); $("login-password").value = ""; await refreshState(); }
-    catch (error) { $("login-error").textContent = error.message; }
+    try { await api("/api/login", "POST", { password: $("login-password").value }); authGeneration++; $("login-password").value = ""; await refreshState(); }
+    catch (error) { if (error.name !== "StaleSessionError") $("login-error").textContent = error.message; }
     finally { button.disabled = false; }
   });
-  $("logout").addEventListener("click", (event) => busy(event.currentTarget, async () => { await api("/api/logout", "POST"); state = null; settingsDirty = false; barkDirty = false; $("bark-key").value = ""; showLogin(); $("login-password").focus(); }));
+  $("logout").addEventListener("click", (event) => busy(event.currentTarget, async () => { authGeneration++; clearActiveLogin(); await api("/api/logout", "POST"); showLogin(); $("login-password").focus(); }));
   $("refresh").addEventListener("click", (event) => busy(event.currentTarget, () => refreshState(true)));
-  $("sync").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/sync", "POST"); await refreshState(); notify(result.message || "同步请求已处理，实际采集结果请查看平台状态。"); }));
+  $("sync").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/sync", "POST"); if (await refreshState()) notify(result.message || "同步请求已处理，实际采集结果请查看平台状态。"); }));
   $("bark-form").addEventListener("submit", (event) => {
     event.preventDefault(); busy(event.submitter || $("bark-form").querySelector("button"), async () => {
       const server = $("bark-server").value.trim(); const key = $("bark-key").value.trim();
       if (!key && !state.bark?.configured) throw new Error("首次配置需要填写 Bark 设备密钥。");
       if (!key && state.bark?.configured && server !== state.bark.server) throw new Error("修改 Bark 服务地址时，请重新填写设备密钥。");
-      await api("/api/bark", "PUT", { server, key }); barkDirty = false; $("bark-key").value = ""; await refreshState(); notify("Bark 配置已保存。");
+      await api("/api/bark", "PUT", { server, key }); barkDirty = false; $("bark-key").value = ""; if (await refreshState()) notify("Bark 配置已保存。");
     });
   });
   $("bark-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/bark/test", "POST"); notify(result.message || "Bark 服务已接受测试通知，请检查 iPhone。"); }));
@@ -340,7 +388,7 @@
       const settings = { deadline_minutes: parseMinutes("deadline-minutes", "截止提醒"), exam_start_minutes: parseMinutes("exam-minutes", "考试开始"), video_minutes: parseMinutes("video-minutes", "视频截止"), quiet_enabled: $("quiet-enabled").checked, quiet_start: $("quiet-start").value, quiet_end: $("quiet-end").value, timezone: $("timezone").value.trim() };
       try { new Intl.DateTimeFormat("zh-CN", { timeZone: settings.timezone }); } catch { throw new Error("请填写有效的 IANA 时区，例如 Asia/Shanghai。"); }
       if (settings.quiet_enabled && settings.quiet_start === settings.quiet_end) throw new Error("静默开始和结束时间应不同；全天接收提醒可关闭静默时段。");
-      await api("/api/settings", "PUT", settings); settingsDirty = false; await refreshState(); notify("提醒规则已保存。");
+      await api("/api/settings", "PUT", settings); settingsDirty = false; if (await refreshState()) notify("提醒规则已保存。");
     });
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && authenticated) refreshState(); });
