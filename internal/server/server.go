@@ -33,26 +33,56 @@ type attempt struct {
 	since time.Time
 }
 type Server struct {
-	Engine        *core.Engine
-	Vault         *vault.Vault
-	Demo          bool
-	SecureCookies bool
-	password      [32]byte
-	started       time.Time
-	mu            sync.Mutex
-	sessions      map[string]session
-	attempts      map[string]attempt
-	syncMu        sync.Mutex
-	notifyMu      sync.Mutex
-	lastTestAt    *time.Time
-	lastTestError string
+	zhidaoMu            sync.Mutex
+	zhidaoState         string
+	zhidaoPreviousLogin string
+	zhidaoError         string
+	zhidaoGeneration    uint64
+	zhidaoCancel        context.CancelFunc
+	zhidaoSyncCancel    context.CancelFunc
+	startZhidao         func(context.Context) (*rainFlow, error)
+	newZhidao           func(string) rainAdapter
+
+	Engine            *core.Engine
+	Vault             *vault.Vault
+	Demo              bool
+	SecureCookies     bool
+	password          [32]byte
+	started           time.Time
+	mu                sync.Mutex
+	sessions          map[string]session
+	attempts          map[string]attempt
+	syncGate          chan struct{}
+	notifyMu          sync.Mutex
+	lastTestAt        *time.Time
+	lastTestError     string
+	rainMu            sync.Mutex
+	rainState         string
+	rainPreviousLogin string
+	rainError         string
+	rainGeneration    uint64
+	rainCancel        context.CancelFunc
+	rainSyncCancel    context.CancelFunc
+	lifetime          context.Context
+	lifetimeCancel    context.CancelFunc
+	lifeMu            sync.Mutex
+	stopping          bool
+	jobs              sync.WaitGroup
+	startRain         func(context.Context) (*rainFlow, error)
+	newRain           func(string) rainAdapter
+	sendBark          func(context.Context, string, string, string, string) error
+	deliveryError     string
+	deliveryAt        *time.Time
+	deliveryResult    *deliveryOutcome
 }
 
 func New(engine *core.Engine, credentials *vault.Vault, password string, demo, secure bool) (*Server, error) {
 	if len(password) < 12 {
 		return nil, errors.New("DUERADAR_ADMIN_PASSWORD must contain at least 12 characters")
 	}
-	return &Server{Engine: engine, Vault: credentials, Demo: demo, SecureCookies: secure, password: sha256.Sum256([]byte(password)), started: time.Now(), sessions: map[string]session{}, attempts: map[string]attempt{}}, nil
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Server{Engine: engine, Vault: credentials, Demo: demo, SecureCookies: secure, password: sha256.Sum256([]byte(password)), started: time.Now(), sessions: map[string]session{}, attempts: map[string]attempt{}, syncGate: make(chan struct{}, 1), lifetime: ctx, lifetimeCancel: cancel,
+		startZhidao: defaultZhidaoFlow, newZhidao: func(session string) rainAdapter { return platform.NewZhidao(session) }, startRain: defaultRainFlow, newRain: func(cookie string) rainAdapter { return platform.NewRain(cookie) }, sendBark: bark.Send}, nil
 }
 
 func (s *Server) Handler(files fs.FS) http.Handler {
@@ -73,6 +103,12 @@ func (s *Server) Handler(files fs.FS) http.Handler {
 	mux.HandleFunc("GET /api/bark", s.protected(s.getBark))
 	mux.HandleFunc("PUT /api/bark", s.protected(s.setBark))
 	mux.HandleFunc("POST /api/bark/test", s.protected(s.testBark))
+	mux.HandleFunc("POST /api/accounts/rain/login", s.protected(s.startRainLogin))
+	mux.HandleFunc("POST /api/accounts/zhidao/login", s.protected(s.startZhidaoLogin))
+	mux.HandleFunc("GET /api/accounts/zhidao/login", s.protected(s.zhidaoLoginStatus))
+	mux.HandleFunc("POST /api/accounts/zhidao/login/cancel", s.protected(s.cancelZhidaoLogin))
+	mux.HandleFunc("GET /api/accounts/rain/login", s.protected(s.rainLoginStatus))
+	mux.HandleFunc("POST /api/accounts/rain/login/cancel", s.protected(s.cancelRainLogin))
 	mux.HandleFunc("GET /api/events", s.protected(func(w http.ResponseWriter, r *http.Request) {
 		events := s.Engine.Snapshot().Events
 		sort.SliceStable(events, func(i, j int) bool { return events[i].CreatedAt.After(events[j].CreatedAt) })
@@ -83,15 +119,15 @@ func (s *Server) Handler(files fs.FS) http.Handler {
 	}))
 	mux.HandleFunc("GET /api/status", s.protected(s.status))
 	mux.HandleFunc("POST /api/sync", s.protected(func(w http.ResponseWriter, r *http.Request) {
-		if !s.Demo {
-			fail(w, 409, platform.ErrNotValidated.Error())
+		if !s.Demo && s.Vault.Get().RainCookie == "" && s.Vault.Get().ZhidaoSession == "" {
+			fail(w, 409, "请先绑定平台账号")
 			return
 		}
-		if err := s.Sync(r.Context()); err != nil {
-			fail(w, 500, "示例同步失败")
+		if !s.queueSync() {
+			fail(w, 503, "服务正在停止")
 			return
 		}
-		jsonResponse(w, 200, map[string]string{"message": "示例任务已同步"})
+		jsonResponse(w, 202, map[string]string{"message": "同步已开始，请稍后查看平台结果"})
 	}))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "接口不存在") })
 	mux.Handle("/", http.FileServer(http.FS(files)))
@@ -287,19 +323,26 @@ func (s *Server) setBark(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
-	old := s.Vault.Get()
-	if input.Key == "" {
-		if input.Server != old.BarkURL && old.BarkKey != "" {
-			fail(w, 400, "修改 Bark 服务地址时请重新填写 Key")
+	var validationErr error
+	if err := s.Vault.Update(func(c *vault.Config) error {
+		key := input.Key
+		if key == "" {
+			if input.Server != c.BarkURL && c.BarkKey != "" {
+				validationErr = errors.New("修改 Bark 服务地址时请重新填写 Key")
+				return validationErr
+			}
+			key = c.BarkKey
+		}
+		if validationErr = bark.Validate(input.Server, key); validationErr != nil {
+			return validationErr
+		}
+		c.BarkURL, c.BarkKey = input.Server, key
+		return nil
+	}); err != nil {
+		if validationErr != nil {
+			fail(w, 400, validationErr.Error())
 			return
 		}
-		input.Key = old.BarkKey
-	}
-	if err := bark.Validate(input.Server, input.Key); err != nil {
-		fail(w, 400, err.Error())
-		return
-	}
-	if err := s.Vault.Set(vault.Config{BarkURL: input.Server, BarkKey: input.Key}); err != nil {
 		fail(w, 500, "通知配置保存失败")
 		return
 	}
@@ -313,7 +356,7 @@ func (s *Server) testBark(w http.ResponseWriter, r *http.Request) {
 	s.notifyMu.Lock()
 	defer s.notifyMu.Unlock()
 	c := s.Vault.Get()
-	err := bark.Send(r.Context(), c.BarkURL, c.BarkKey, "DueRadar 测试通知", "提醒服务已连接，学习任务将按你的规则通知。")
+	err := s.sendBark(r.Context(), c.BarkURL, c.BarkKey, "DueRadar 测试通知", "提醒服务已连接，学习任务将按你的规则通知。")
 	now := time.Now()
 	s.mu.Lock()
 	s.lastTestAt = &now
@@ -329,40 +372,132 @@ func (s *Server) testBark(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, map[string]string{"message": "Bark 已接受测试通知"})
 }
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 0, "go_version": runtime.Version(), "message": "平台登录与任务采集待真实会话验证"})
+	s.mu.Lock()
+	deliveryError, deliveryAt := s.deliveryError, s.deliveryAt
+	s.mu.Unlock()
+	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 2, "go_version": runtime.Version(), "message": "普通雨课堂和知到校内课支持扫码绑定；共享课待实测", "notification_error": deliveryError, "notification_last_attempt_at": deliveryAt})
 }
 
 // Sync and Deliver have separate clocks; slow polling does not postpone known deadlines.
 func (s *Server) Sync(ctx context.Context) error {
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
-	if !s.Demo {
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	select {
+	case s.syncGate <- struct{}{}:
+		defer func() { <-s.syncGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.Demo {
+		return s.seedDemo(time.Now())
+	}
+	// Start both platforms together so a slow platform cannot consume the
+	// caller's entire deadline before its peer gets a chance to synchronize.
+	// The round gate bounds this to two concurrent platform operations.
+	var waiting sync.WaitGroup
+	var results [2]error
+	for i, synchronize := range []func(context.Context) error{s.syncRain, s.syncZhidao} {
+		waiting.Add(1)
+		go func(index int, synchronize func(context.Context) error) {
+			defer waiting.Done()
+			platformCtx, platformCancel := context.WithTimeout(ctx, 5*time.Minute)
+			defer platformCancel()
+			results[index] = synchronize(platformCtx)
+		}(i, synchronize)
+	}
+	waiting.Wait()
+	return errors.Join(results[:]...)
+}
+func (s *Server) syncRain(ctx context.Context) error {
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	s.rainMu.Lock()
+	if s.rainState == "initializing" || s.rainState == "waiting" {
+		s.rainMu.Unlock()
 		return nil
 	}
-	return s.seedDemo(time.Now())
+	generation := s.rainGeneration
+	s.rainSyncCancel = cancel
+	cookie := s.Vault.Get().RainCookie
+	s.rainMu.Unlock()
+	defer func() {
+		s.rainMu.Lock()
+		if generation == s.rainGeneration {
+			s.rainSyncCancel = nil
+		}
+		s.rainMu.Unlock()
+	}()
+	if cookie == "" {
+		return nil
+	}
+	adapter := s.newRain(cookie)
+	if err := adapter.Validate(ctx); err != nil {
+		_ = s.failRainSync(ctx, generation, errors.Is(err, platform.ErrSessionExpired), "登录验证失败")
+		return err
+	}
+	if err := s.commitRainSync(ctx, generation, func() error {
+		return s.Engine.SetAccount(core.Account{Platform: core.PlatformRain, LoginState: "logged_in"})
+	}); err != nil {
+		return err
+	}
+	tasks, err := adapter.Tasks(ctx)
+	if err != nil {
+		_ = s.failRainSync(ctx, generation, errors.Is(err, platform.ErrSessionExpired), "任务采集失败")
+		return err
+	}
+	return s.commitRainSync(ctx, generation, func() error { return s.Engine.Sync(core.PlatformRain, tasks, time.Now()) })
 }
+
 func (s *Server) Deliver(ctx context.Context) {
 	if s.Demo {
 		return
 	}
 	s.notifyMu.Lock()
 	defer s.notifyMu.Unlock()
+	if s.deliveryResult != nil {
+		if err := s.persistDelivery(); err != nil {
+			s.setDeliveryError("通知结果保存失败，发送已暂停；请检查数据目录")
+			return
+		}
+	}
 	c := s.Vault.Get()
 	if c.BarkKey == "" {
 		return
 	}
-	for _, event := range s.Engine.Pending(time.Now()) {
-		err := bark.Send(ctx, c.BarkURL, c.BarkKey, event.Title, event.Body)
-		if err != nil {
-			_ = s.Engine.MarkFailed(event.ID, err.Error(), time.Now())
-		} else {
-			_ = s.Engine.MarkSent(event.ID, time.Now())
+	events, err := s.Engine.PendingWithError(time.Now())
+	if err != nil {
+		s.setDeliveryError("通知队列保存失败，发送已暂停；请检查数据目录")
+		return
+	}
+	s.setDeliveryError("")
+	for _, event := range events {
+		if ctx.Err() != nil {
+			return
+		}
+		if !s.Engine.ClaimStillValid(event.ID, time.Now()) {
+			continue
+		}
+		err := s.sendBark(ctx, c.BarkURL, c.BarkKey, event.Title, event.Body)
+		s.deliveryResult = &deliveryOutcome{id: event.ID, sent: err == nil, at: time.Now()}
+		if persistErr := s.persistDelivery(); persistErr != nil {
+			s.setDeliveryError("通知结果保存失败，发送已暂停；请检查数据目录")
+			return
 		}
 	}
 }
 func (s *Server) Run(ctx context.Context) {
-	go func() {
-		_ = s.Sync(ctx)
+	stop := context.AfterFunc(ctx, s.stopBackground)
+	defer stop()
+	s.startJob(func(ctx context.Context) {
+		syncOnce := func() {
+			syncCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			defer cancel()
+			_ = s.Sync(syncCtx)
+		}
+		syncOnce()
 		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -370,20 +505,23 @@ func (s *Server) Run(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_ = s.Sync(ctx)
+				syncOnce()
 			}
 		}
-	}()
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.Deliver(ctx)
+	})
+	s.startJob(func(ctx context.Context) {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.Deliver(ctx)
+			}
 		}
-	}
+	})
+	<-s.lifetime.Done()
 }
 
 func (s *Server) seedDemo(now time.Time) error {

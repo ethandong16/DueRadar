@@ -514,3 +514,24 @@ func TestClaimedEventsDoNotAliasPersistentState(t *testing.T) {
 		t.Fatal("caller mutated persisted delivery lease")
 	}
 }
+
+func TestPendingWithErrorDoesNotHideFailedClaimCommit(t *testing.T) {
+	e := openTest(t)
+	now := stamp("2026-10-21T10:00:00+08:00")
+	task := homework("one", now.Add(time.Hour))
+	mustSync(t, e, []Task{task}, now)
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e.path = filepath.Join(blocked, "state.json")
+	events, err := e.PendingWithError(now)
+	if err == nil || len(events) != 0 {
+		t.Fatal("failed claim persistence was hidden")
+	}
+	for _, event := range e.Snapshot().Events {
+		if event.Attempts != 0 || event.Status == "sending" {
+			t.Fatal("failed durable claim changed in-memory state")
+		}
+	}
+}

@@ -25,8 +25,8 @@ type Capability struct {
 
 func Capabilities() []Capability {
 	return []Capability{
-		{ID: core.PlatformRain, Name: "普通雨课堂", Message: ErrNotValidated.Error()},
+		{ID: core.PlatformRain, Name: "普通雨课堂", Ready: true, Message: "支持微信扫码绑定；密码登录待接入验证"},
 		{ID: core.PlatformZhidaoShared, Name: "知到 · 共享课", Message: ErrNotValidated.Error()},
-		{ID: core.PlatformZhidaoCampus, Name: "知到 · 校内课", Message: ErrNotValidated.Error()},
+		{ID: core.PlatformZhidaoCampus, Name: "知到 · 校内课", Ready: true, Message: "支持知到 APP 扫码，读取 AI 智课、翻转课作业和考试、翻转课视频进度；缺失截止时间保持未知"},
 	}
 }

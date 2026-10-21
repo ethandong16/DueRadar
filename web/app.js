@@ -156,9 +156,54 @@
       card.append(node("p", "platform-message", platform.message || "平台登录与任务读取待验证，当前没有已确认的真实会话。"));
       card.append(node("p", "platform-date", `最近成功同步：${timestamp(platform.last_success) ? formatDate(platform.last_success) : "尚无成功记录"}`));
       if (Number(platform.failures) > 0) card.append(node("p", "platform-date", `连续失败：${Number(platform.failures)} 轮`));
+      if (["rain", "zhidao_campus"].includes(platform.id) && platform.ready && !state.demo) {
+        const bind = node("button", "button primary", platform.login_status === "logged_in" ? "重新扫码绑定" : (platform.id === "rain" ? "微信扫码绑定" : "知到 APP 扫码绑定"));
+        bind.type = "button"; bind.addEventListener("click", () => busy(bind, () => openRainLogin(platform.id))); card.append(bind);
+      }
       $("platform-list").append(card);
     }
   }
+  let activeLogin;
+  async function openRainLogin(id) {
+    if (activeLogin) { notify("请先完成或关闭当前扫码绑定。"); return; }
+    const login = { path: id === "rain" ? "/api/accounts/rain/login" : "/api/accounts/zhidao/login", timer: null, completed: false };
+    activeLogin = login;
+    const label = id === "rain" ? "普通雨课堂" : "知到";
+    const scanner = id === "rain" ? "微信" : "知到 APP";
+    let result;
+    try { result = await api(login.path, "POST"); }
+    catch (error) {
+      try { await api(`${login.path}/cancel`, "POST"); } catch (_) { /* Keep the original creation error. */ }
+      if (activeLogin === login) activeLogin = null;
+      throw error;
+    }
+    $("rain-title").textContent = `绑定${label}`;
+    $("rain-qr").alt = `${label}官方登录二维码`;
+    $("rain-qr").src = result.image;
+    $("rain-login-status").textContent = `请使用${scanner}扫码，并在手机上确认登录。二维码约 3 分钟有效。`;
+    $("rain-dialog").showModal();
+    async function poll() {
+      try {
+        const result = await api(login.path);
+        if (activeLogin !== login || !$("rain-dialog").open) return;
+        if (result.state === "logged_in") { login.completed = true; $("rain-dialog").close(); notify(`${label}登录已确认，正在读取任务。`); await refreshState(); return; }
+        if (result.state === "failed") { $("rain-login-status").textContent = result.error || "二维码失效，请关闭后重新绑定。"; return; }
+        if (result.state === "canceled" || !$("rain-dialog").open) return;
+        login.timer = setTimeout(poll, 2000);
+      } catch (error) { if (activeLogin === login && $("rain-dialog").open) $("rain-login-status").textContent = error.message; }
+    }
+    login.timer = setTimeout(poll, 1500);
+  }
+  $("rain-close").addEventListener("click", () => $("rain-dialog").close());
+  $("rain-dialog").addEventListener("close", async () => {
+    const login = activeLogin;
+    if (!login) return;
+    clearTimeout(login.timer);
+    $("rain-qr").removeAttribute("src");
+    try { if (!login.completed) await api(`${login.path}/cancel`, "POST"); }
+    catch (_) { /* Closing the dialog still releases the local flow. */ }
+    finally { if (activeLogin === login) activeLogin = null; }
+  });
   function eventTitle(event) { return state.tasks.find((task) => task.id === event.task_id)?.title || event.title || (event.task_id ? `任务 ${event.task_id}` : (eventNames[event.kind] || "系统事件")); }
   function renderEvents() {
     const events = state.events || [];
@@ -220,7 +265,7 @@
     const runtime = state.runtime || {};
     const uptime = Number.isFinite(runtime.uptime_seconds) ? `${Math.floor(runtime.uptime_seconds / 3600)} 小时 ${Math.floor(runtime.uptime_seconds % 3600 / 60)} 分钟` : "未知";
     const interval = Number.isFinite(runtime.scheduler_interval_seconds) ? `每 ${runtime.scheduler_interval_seconds} 秒` : "未知";
-    for (const [label, value] of [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval]]) { const card = node("article", "runtime-card"); card.append(node("span", "", label), node("strong", "", value)); $("runtime-grid").append(card); }
+    for (const [label, value] of [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["通知运行状态", runtime.notification_error || "正常"]]) { const card = node("article", "runtime-card"); card.append(node("span", "", label), node("strong", "", value)); $("runtime-grid").append(card); }
     $("version").textContent = runtime.version ? `· ${runtime.version}` : "";
     try { $("today").textContent = new Intl.DateTimeFormat("zh-CN", { dateStyle: "full", timeZone: settings.timezone || "Asia/Shanghai" }).format(new Date()); } catch { $("today").textContent = new Date().toLocaleDateString("zh-CN"); }
     renderTasks(); renderPlatforms(); renderEvents();

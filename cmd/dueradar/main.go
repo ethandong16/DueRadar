@@ -64,20 +64,37 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := app.Sync(ctx); err != nil {
-		log.Fatal(err)
+	if *demo {
+		if err := app.Sync(ctx); err != nil {
+			log.Fatal(err)
+		}
 	}
 	httpServer := &http.Server{Addr: *listen, Handler: app.Handler(web.Files), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	go app.Run(ctx)
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		_ = httpServer.Shutdown(shutdown)
+		backgroundDone := make(chan error, 1)
+		go func() { backgroundDone <- app.Shutdown(shutdown) }()
+		if err := httpServer.Shutdown(shutdown); err != nil {
+			log.Print("HTTP shutdown deadline reached")
+		}
+		if err := <-backgroundDone; err != nil {
+			log.Print("Background shutdown deadline reached")
+		}
 	}()
 	log.Printf("DueRadar %s listening on %s (demo=%t)", server.Version, *listen, *demo)
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	serveErr := httpServer.ListenAndServe()
+	if err := serveErr; err != nil && err != http.ErrServerClosed {
+		log.Print(err)
+		stop()
+	}
+	<-shutdownDone
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		os.Exit(1)
 	}
 }
 

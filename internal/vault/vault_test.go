@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -34,5 +35,31 @@ func TestEncryptedRoundTripAndTampering(t *testing.T) {
 	}
 	if _, err = Open(dir); err == nil {
 		t.Fatal("tampered credentials accepted")
+	}
+}
+
+func TestIndependentCredentialUpdatesPreserved(t *testing.T) {
+	v, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := v.Update(func(c *Config) error { c.BarkKey = "bark-test"; return nil }); err != nil {
+			t.Error(err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := v.Update(func(c *Config) error { c.RainCookie = "sessionid=test"; return nil }); err != nil {
+			t.Error(err)
+		}
+	}()
+	wg.Wait()
+	got := v.Get()
+	if got.BarkKey != "bark-test" || got.RainCookie != "sessionid=test" {
+		t.Fatal("concurrent update lost unrelated credentials")
 	}
 }

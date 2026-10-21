@@ -1,0 +1,65 @@
+package platform
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestQRLoginEstablishesIndependentSession(t *testing.T) {
+	confirmed := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/user/login/app-web-login":
+			var input map[string]string
+			json.NewDecoder(r.Body).Decode(&input)
+			if input["token"] != "fixture-token" {
+				t.Error("wrong login token")
+			}
+			http.SetCookie(w, &http.Cookie{Name: "csrftoken", Value: "fixture-csrf", Path: "/"})
+			w.Write([]byte(`{"code":0,"data":{"UserID":123,"Auth":"fixture-auth"}}`))
+		case "/pc/web_login":
+			if r.Header.Get("X-CSRFToken") != "fixture-csrf" {
+				t.Error("missing csrf")
+			}
+			var input map[string]any
+			json.NewDecoder(r.Body).Decode(&input)
+			if input["UserID"] != float64(123) || input["Auth"] != "fixture-auth" {
+				t.Error("wrong confirmation payload")
+			}
+			confirmed = true
+			http.SetCookie(w, &http.Cookie{Name: "sessionid", Value: "fixture-session", Path: "/", HttpOnly: true})
+			w.Write([]byte(`{"success":true}`))
+		default:
+			t.Error("unexpected endpoint")
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	jar, _ := cookiejar.New(nil)
+	flow := &RainLogin{base: srv.URL, client: &http.Client{Jar: jar}, token: "fixture-token"}
+	cookie, err := flow.Wait(context.Background())
+	if err != nil || !confirmed || !strings.Contains(cookie, "sessionid=fixture-session") {
+		t.Fatal("login confirmation failed", err)
+	}
+}
+
+func TestQRLoginRejectsMissingSessionAndRefusedLogin(t *testing.T) {
+	for _, body := range []string{`{"code":1,"data":{}}`, `{"code":0,"data":{}}`} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) }))
+		jar, _ := cookiejar.New(nil)
+		flow := &RainLogin{base: srv.URL, client: &http.Client{Jar: jar}, token: "fixture-token"}
+		_, err := flow.Wait(context.Background())
+		srv.Close()
+		if err == nil {
+			t.Fatal("unconfirmed login accepted")
+		}
+		if strings.Contains(err.Error(), "fixture-token") {
+			t.Fatal("token leaked")
+		}
+	}
+}

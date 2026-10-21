@@ -13,8 +13,10 @@ import (
 )
 
 type Config struct {
-	BarkURL string `json:"bark_url"`
-	BarkKey string `json:"bark_key"`
+	BarkURL       string `json:"bark_url"`
+	BarkKey       string `json:"bark_key"`
+	RainCookie    string `json:"rain_cookie,omitempty"`
+	ZhidaoSession string `json:"zhidao_session,omitempty"`
 }
 
 type Vault struct {
@@ -87,6 +89,21 @@ func (v *Vault) Get() Config { v.mu.Lock(); defer v.mu.Unlock(); return v.config
 func (v *Vault) Set(config Config) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	return v.write(config)
+}
+
+// Update merges independent configuration changes in one transaction.
+func (v *Vault) Update(change func(*Config) error) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	config := v.config
+	if err := change(&config); err != nil {
+		return err
+	}
+	return v.write(config)
+}
+
+func (v *Vault) write(config Config) error {
 	plain, err := json.Marshal(config)
 	if err != nil {
 		return err

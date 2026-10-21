@@ -16,6 +16,8 @@ jobs:
       - run: test -z "$(gofmt -l cmd internal web)"
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      - run: node --check web/app.js
+      - run: node --test web/login.test.cjs
       - name: Cross compile Linux targets
         run: |
           mkdir -p dist

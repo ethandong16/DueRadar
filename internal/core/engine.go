@@ -468,6 +468,12 @@ func collapseRecovery(s *State, p string, now time.Time) {
 // 30-minute deadline event bypasses quiet hours, including its delayed retry.
 // Other offsets and discovery/time-change events never inherit urgency.
 func (e *Engine) Pending(now time.Time) []Event {
+	events, _ := e.PendingWithError(now)
+	return events
+}
+
+// PendingWithError reports durable claim failures separately from an idle queue.
+func (e *Engine) PendingWithError(now time.Time) ([]Event, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := cloneState(e.state)
@@ -524,12 +530,12 @@ func (e *Engine) Pending(now time.Time) []Event {
 	}
 	if changed {
 		if err := e.save(s); err != nil {
-			return nil
+			return nil, err
 		}
 		e.state = s
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].DueAt.Before(result[j].DueAt) })
-	return result
+	return result, nil
 }
 
 func (e *Engine) MarkSent(id string, now time.Time) error {
@@ -540,7 +546,7 @@ func (e *Engine) MarkSent(id string, now time.Time) error {
 				if ev.Status == "sent" {
 					return nil
 				}
-				if ev.Status != "sending" {
+				if ev.Status != "sending" && !(ev.Status == "canceled" && ev.Attempts > 0) {
 					return errors.New("event is not claimed")
 				}
 				ev.Status = "sent"
@@ -559,6 +565,9 @@ func (e *Engine) MarkFailed(id string, message string, now time.Time) error {
 		for i := range s.Events {
 			ev := &s.Events[i]
 			if ev.ID == id {
+				if ev.Status == "canceled" {
+					return nil
+				}
 				if ev.Status != "sending" {
 					return errors.New("event is not claimed")
 				}

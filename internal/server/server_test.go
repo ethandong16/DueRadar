@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/ethandong16/due-radar/internal/core"
 	"github.com/ethandong16/due-radar/internal/vault"
@@ -30,6 +32,13 @@ func testApp(t *testing.T) (*Server, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.Shutdown(ctx); err != nil {
+			t.Error(err)
+		}
+	})
 	return s, s.Handler(fstest.MapFS{"index.html": {Data: []byte("DueRadar")}})
 }
 func request(h http.Handler, method, path, body string, cookie *http.Cookie, origin string) *httptest.ResponseRecorder {
