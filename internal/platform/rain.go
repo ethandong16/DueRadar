@@ -488,6 +488,9 @@ func (r *Rain) request(ctx context.Context, method, path, classroomID string, bo
 	const maxBody = 4 << 20
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
+		if ctx.Err() != nil {
+			return env, ctx.Err()
+		}
 		return env, errors.New("雨课堂响应读取失败")
 	}
 	if len(responseBody) > maxBody {

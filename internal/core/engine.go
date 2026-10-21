@@ -190,7 +190,8 @@ func (e *Engine) Sync(platform string, tasks []Task, now time.Time) error {
 	}
 	return e.change(func(s *State) error {
 		ai := accountIndex(s, platform)
-		recovery := s.Accounts[ai].NeedsRevalidation
+		previous := s.Accounts[ai]
+		recovery := previous.NeedsRevalidation || previous.LastSuccessAt != nil && now.Sub(*previous.LastSuccessAt) > FreshnessLimit
 		byID := map[string]int{}
 		for i, t := range s.Tasks {
 			if t.Platform == platform {
@@ -513,6 +514,26 @@ func (e *Engine) PendingWithError(now time.Time) ([]Event, error) {
 		urgent := ev.Kind == "exam_start" && ev.MinutesBefore == 60 || (ev.Kind == "deadline" || ev.Kind == "video_deadline") && ev.MinutesBefore == 30
 		if IsQuiet(s.Settings, now) && !urgent {
 			continue
+		}
+		// Keep event identity and due time stable while sending the latest task
+		// metadata, other timestamp, and display timezone confirmed by sync.
+		if ev.Kind != "fault" {
+			for _, task := range s.Tasks {
+				if task.Platform == ev.Platform && task.ID == ev.TaskID {
+					prefix := "任务即将截止 · "
+					switch ev.Kind {
+					case "new_task":
+						prefix = "新任务 · "
+					case "time_changed":
+						prefix = "任务时间变更 · "
+					case "exam_start":
+						prefix = "考试即将开始 · "
+					}
+					ev.Title = prefix + task.Title
+					ev.Body = taskBody(task, s.Settings)
+					break
+				}
+			}
 		}
 		ev.Status = "sending"
 		ev.Attempts++

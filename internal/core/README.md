@@ -33,6 +33,10 @@ explicit recovery also gates delivery, then each platform's successful sync
 collapses already-due valid events to the most recent per task. Future events
 remain independently scheduled. Expired task deadlines, started exams, unknown
 or completed tasks, removed offsets, and superseded timestamps do not send.
+Successful sync after a gap longer than the freshness limit also uses recovery
+collapse, even if a suspended process did not record a failed polling round.
+Claims keep their event identity while rendering the latest confirmed task
+title, course, timestamps, and configured display timezone.
 
 Quiet hours are interpreted in the configured timezone, including intervals
 across midnight. Only configured exact 60-minute exam-start and exact 30-minute
@@ -53,6 +57,9 @@ same directory. The store is thread safe within a single process; run only one
 process per data directory. Successful remote delivery followed by a process
 crash before `MarkSent` can result in a retry: exactly-once notification delivery
 requires idempotency support from the remote notification service.
+Deep copies preserve values without a JSON round trip. An unserializable input
+(for example a timestamp outside JSON's supported year range) fails the write
+and leaves both the previous in-memory state and persisted file unchanged.
 
 Validation: `go test ./internal/core` covers defaults, midnight boundaries,
 first-sync/persistent dedup, urgent exceptions, custom offsets, video schedules,

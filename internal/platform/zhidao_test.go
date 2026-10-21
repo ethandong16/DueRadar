@@ -107,7 +107,7 @@ func TestZhidaoPaginatedActivitiesAndUnknownValues(t *testing.T) {
 	if err != nil || len(tasks) != 2 {
 		t.Fatalf("tasks %d: %v", len(tasks), err)
 	}
-	if tasks[0].Status != "completed" || tasks[0].StartAt.UTC().Hour() != 23 || tasks[1].Status != "unknown" || tasks[1].EndAt != nil {
+	if tasks[0].Status != "completed" || tasks[0].StartAt.UTC().Hour() != 23 || tasks[1].Status != "unknown" || tasks[1].EndAt != nil || tasks[1].RawTime != "endTime=bad" {
 		t.Fatal("mapping invented missing fields")
 	}
 }

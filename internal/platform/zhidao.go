@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethandong16/due-radar/internal/core"
@@ -39,9 +40,19 @@ func NewZhidao(serialized string) *Zhidao {
 		}
 		h := u.Hostname()
 		if u.Scheme == "https" && (h == "zhihuishu.com" || h == "polymas.com" || endsWithDomain(h, "zhihuishu.com") || endsWithDomain(h, "polymas.com")) {
-			j.CookieJar.SetCookies(u, []*http.Cookie{record.Cookie})
+			cookie := *record.Cookie
+			// Older snapshots stored relative MaxAge without their receipt time.
+			// Such cookies cannot be restored safely unless Expires is known.
+			if cookie.MaxAge > 0 && cookie.Expires.IsZero() {
+				continue
+			}
+			if cookie.MaxAge > 0 {
+				cookie.MaxAge = 0
+			}
+			j.SetCookies(u, []*http.Cookie{&cookie})
 		}
 	}
+	z.refreshToken()
 	return z
 }
 func endsWithDomain(host, domain string) bool {
@@ -51,10 +62,20 @@ func (z *Zhidao) Validate(ctx context.Context) error {
 	if z.initErr != nil {
 		return z.initErr
 	}
-	return validateZhidao(ctx, z.client, z.base, &z.session)
+	z.refreshToken()
+	err := validateZhidao(ctx, z.client, z.base, &z.session)
+	if err == nil {
+		z.refreshToken()
+	}
+	return err
 }
 func (z *Zhidao) request(ctx context.Context, method, path string, body, out any) error {
-	return zhidaoRequest(ctx, z.client, method, z.base+path, z.session.Token, body, out)
+	z.refreshToken()
+	err := zhidaoRequest(ctx, z.client, method, z.base+path, z.session.Token, body, out)
+	if err == nil {
+		z.refreshToken()
+	}
+	return err
 }
 func (z *Zhidao) courses(ctx context.Context) ([]zhidaoCourse, error) {
 	if z.session.SchoolNID == "" {
@@ -62,6 +83,7 @@ func (z *Zhidao) courses(ctx context.Context) ([]zhidaoCourse, error) {
 	}
 	var courses []zhidaoCourse
 	seen := map[string]bool{}
+	var expectedTotal int64 = -1
 	for page := 1; page <= 200; page++ {
 		var result struct {
 			Code int `json:"code"`
@@ -81,6 +103,10 @@ func (z *Zhidao) courses(ctx context.Context) ([]zhidaoCourse, error) {
 		if err != nil || total < 0 {
 			return nil, errors.New("知到课程分页信息无效")
 		}
+		if expectedTotal >= 0 && total != expectedTotal {
+			return nil, errors.New("知到课程总数在翻页期间变化，请稍后重试")
+		}
+		expectedTotal = total
 		for _, course := range result.Data.List {
 			if course.ID == "" || course.Name == "" || seen[course.ID] {
 				return nil, errors.New("知到课程分页不完整或重复")
@@ -141,6 +167,18 @@ func zhidaoTime(value string) *time.Time {
 	}
 	return &t
 }
+
+func zhidaoRawTime(start, end string) string {
+	fields := []string{}
+	if start != "" {
+		fields = append(fields, "startTime="+start)
+	}
+	if end != "" {
+		fields = append(fields, "endTime="+end)
+	}
+	return strings.Join(fields, ";")
+}
+
 func (z *Zhidao) aiTasks(ctx context.Context, course zhidaoCourse) ([]core.Task, error) {
 	if len(course.Terms) == 0 {
 		return nil, errors.New("知到课程未提供所属学期")
@@ -149,11 +187,12 @@ func (z *Zhidao) aiTasks(ctx context.Context, course zhidaoCourse) ([]core.Task,
 	seen := map[string]bool{}
 	for _, term := range course.Terms {
 		count := 0
+		expectedTotal := -1
 		for page := 1; page <= 500; page++ {
 			var result struct {
 				Code int `json:"code"`
 				Data struct {
-					Total int              `json:"totalCount"`
+					Total *int             `json:"totalCount"`
 					List  []zhidaoActivity `json:"activityTaskList"`
 				} `json:"data"`
 			}
@@ -161,9 +200,13 @@ func (z *Zhidao) aiTasks(ctx context.Context, course zhidaoCourse) ([]core.Task,
 			if err := z.request(ctx, "POST", "/student-course/activityTask/list", body, &result); err != nil {
 				return nil, err
 			}
-			if result.Code != 200 || result.Data.List == nil || result.Data.Total < 0 {
+			if result.Code != 200 || result.Data.List == nil || result.Data.Total == nil || *result.Data.Total < 0 {
 				return nil, errors.New("知到任务列表读取失败")
 			}
+			if expectedTotal >= 0 && *result.Data.Total != expectedTotal {
+				return nil, errors.New("知到任务总数在翻页期间变化，请稍后重试")
+			}
+			expectedTotal = *result.Data.Total
 			for _, row := range result.Data.List {
 				if row.ID == "" || row.Title == "" {
 					return nil, errors.New("知到任务缺少标识或标题")
@@ -189,13 +232,13 @@ func (z *Zhidao) aiTasks(ctx context.Context, course zhidaoCourse) ([]core.Task,
 						status = "completed"
 					}
 				}
-				tasks = append(tasks, core.Task{ID: id, Platform: core.PlatformZhidaoCampus, Course: course.Name, Title: row.Title, Kind: kind, Status: status, StartAt: zhidaoTime(row.Start), EndAt: zhidaoTime(row.End), SourceTimezone: "Asia/Shanghai", SourceURL: "https://hike-teaching-center.polymas.com/agent-course-full/" + url.PathEscape(course.ID) + "/stu/task"})
+				tasks = append(tasks, core.Task{ID: id, Platform: core.PlatformZhidaoCampus, Course: course.Name, Title: row.Title, Kind: kind, Status: status, StartAt: zhidaoTime(row.Start), EndAt: zhidaoTime(row.End), RawTime: zhidaoRawTime(row.Start, row.End), SourceTimezone: "Asia/Shanghai", SourceURL: "https://hike-teaching-center.polymas.com/agent-course-full/" + url.PathEscape(course.ID) + "/stu/task"})
 			}
 			count += len(result.Data.List)
-			if count == result.Data.Total {
+			if count == expectedTotal {
 				break
 			}
-			if len(result.Data.List) == 0 || count > result.Data.Total || page == 500 {
+			if len(result.Data.List) == 0 || count > expectedTotal || page == 500 {
 				return nil, errors.New("知到任务分页不完整")
 			}
 		}

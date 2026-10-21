@@ -209,5 +209,28 @@ func (s *Server) syncZhidao(ctx context.Context) error {
 		_ = s.failZhidaoSync(ctx, generation, errors.Is(err, platform.ErrSessionExpired), "任务采集失败")
 		return err
 	}
+	// Persist renewed cookies only after a complete successful read. The same
+	// generation guard prevents a previous account from replacing a new login.
+	if exporter, ok := adapter.(interface{ Credentials() (string, error) }); ok {
+		updated, err := exporter.Credentials()
+		if err != nil || updated == "" {
+			_ = s.failZhidaoSync(ctx, generation, false, "会话续期读取失败")
+			return errors.New("知到会话续期读取失败")
+		}
+		if updated != cookie {
+			if err := s.commitZhidaoSync(ctx, generation, func() error {
+				return s.Vault.Update(func(c *vault.Config) error {
+					if c.ZhidaoSession != cookie {
+						return errSupersededLogin
+					}
+					c.ZhidaoSession = updated
+					return nil
+				})
+			}); err != nil {
+				_ = s.failZhidaoSync(ctx, generation, false, "会话续期保存失败")
+				return err
+			}
+		}
+	}
 	return s.commitZhidaoSync(ctx, generation, func() error { return s.Engine.Sync(core.PlatformZhidaoCampus, tasks, time.Now()) })
 }

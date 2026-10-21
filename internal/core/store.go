@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
+	"time"
 )
 
 type Engine struct {
@@ -71,12 +73,39 @@ func (e *Engine) Snapshot() State {
 }
 
 func cloneState(s State) State {
-	// All data admitted into State is JSON serializable. This also copies all
-	// slices and optional scalar pointers shared with adapters and HTTP callers.
-	b, _ := json.Marshal(s)
-	var copy State
-	_ = json.Unmarshal(b, &copy)
+	// Copy without serialization: invalid adapter timestamps must reach save's
+	// validation error, never turn a transaction into an empty, valid JSON state.
+	copy := s
+	copy.Tasks = slices.Clone(s.Tasks)
+	for i := range copy.Tasks {
+		copy.Tasks[i].StartAt = cloneTime(s.Tasks[i].StartAt)
+		copy.Tasks[i].EndAt = cloneTime(s.Tasks[i].EndAt)
+		if s.Tasks[i].Progress != nil {
+			value := *s.Tasks[i].Progress
+			copy.Tasks[i].Progress = &value
+		}
+	}
+	copy.Events = slices.Clone(s.Events)
+	for i := range copy.Events {
+		copy.Events[i].SentAt = cloneTime(s.Events[i].SentAt)
+		copy.Events[i].AnchorAt = cloneTime(s.Events[i].AnchorAt)
+		copy.Events[i].NextAttemptAt = cloneTime(s.Events[i].NextAttemptAt)
+	}
+	copy.Accounts = slices.Clone(s.Accounts)
+	for i := range copy.Accounts {
+		copy.Accounts[i].LastSuccessAt = cloneTime(s.Accounts[i].LastSuccessAt)
+	}
+	copy.Settings.DeadlineMinutes = slices.Clone(s.Settings.DeadlineMinutes)
+	copy.Settings.ExamStartMinutes = slices.Clone(s.Settings.ExamStartMinutes)
+	copy.Settings.VideoMinutes = slices.Clone(s.Settings.VideoMinutes)
 	return copy
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	return timePtr(*value)
 }
 
 func (e *Engine) change(fn func(*State) error) error {

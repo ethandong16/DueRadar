@@ -28,7 +28,7 @@ func StartRainLogin(ctx context.Context) (*RainLogin, error) {
 	jar, _ := cookiejar.New(nil)
 	l := &RainLogin{client: &http.Client{Jar: jar, Timeout: 185 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, base: "https://www.yuketang.cn"}
 	var response struct {
-		Code int `json:"code"`
+		Code *int `json:"code"`
 		Data struct {
 			QR    string `json:"qrContent"`
 			Token string `json:"token"`
@@ -37,7 +37,7 @@ func StartRainLogin(ctx context.Context) (*RainLogin, error) {
 	if err := l.request(ctx, "GET", "/api/v3/user/login/app-web-pre-info", nil, &response); err != nil {
 		return nil, err
 	}
-	if response.Code != 0 || response.Data.QR == "" || response.Data.Token == "" {
+	if response.Code == nil || *response.Code != 0 || response.Data.QR == "" || response.Data.Token == "" {
 		return nil, errors.New("雨课堂暂未返回有效二维码")
 	}
 	l.token = response.Data.Token
@@ -73,13 +73,24 @@ func (l *RainLogin) request(ctx context.Context, method, path string, body any, 
 	}
 	r, err := l.client.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errors.New("雨课堂登录连接失败或二维码已过期")
 	}
 	defer r.Body.Close()
 	if r.StatusCode != 200 {
 		return errors.New("雨课堂登录服务未接受请求")
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(out); err != nil {
+	const maxBody = 1 << 20
+	responseBody, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errors.New("雨课堂登录响应读取失败")
+	}
+	if len(responseBody) > maxBody || json.Unmarshal(responseBody, out) != nil {
 		return errors.New("雨课堂登录响应格式发生变化")
 	}
 	return nil
@@ -87,13 +98,13 @@ func (l *RainLogin) request(ctx context.Context, method, path string, body any, 
 
 func (l *RainLogin) Wait(ctx context.Context) (string, error) {
 	var response struct {
-		Code int                        `json:"code"`
+		Code *int                       `json:"code"`
 		Data map[string]json.RawMessage `json:"data"`
 	}
 	if err := l.request(ctx, "POST", "/api/v3/user/login/app-web-login", map[string]string{"token": l.token}, &response); err != nil {
 		return "", err
 	}
-	if response.Code != 0 {
+	if response.Code == nil || *response.Code != 0 {
 		return "", errors.New("二维码已过期或登录未确认，请重新扫码")
 	}
 	id, auth := response.Data["UserID"], response.Data["Auth"]

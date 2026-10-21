@@ -37,15 +37,6 @@ type zhidaoJar struct {
 	records []zhidaoCookie
 }
 
-func (j *zhidaoJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	j.CookieJar.SetCookies(u, cookies)
-	for _, c := range cookies {
-		clone := *c
-		j.records = append(j.records, zhidaoCookie{u.String(), &clone})
-	}
-}
 func newZhidaoClient() (*http.Client, *zhidaoJar) {
 	jar, _ := cookiejar.New(nil)
 	j := &zhidaoJar{CookieJar: jar}
@@ -111,7 +102,7 @@ func (l *ZhidaoLogin) Wait(ctx context.Context) (string, error) {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return "", errors.New("知到扫码已取消或过期")
+			return "", ctx.Err()
 		case <-timer.C:
 		}
 	}
@@ -123,6 +114,9 @@ func (l *ZhidaoLogin) complete(ctx context.Context, once string) (string, error)
 	req.Header.Set("User-Agent", "Mozilla/5.0 DueRadar/0.1")
 	resp, err := l.client.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", errors.New("知到登录确认连接失败")
 	}
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 2<<20))
@@ -157,9 +151,7 @@ func (l *ZhidaoLogin) complete(ctx context.Context, once string) (string, error)
 	if err := validateZhidao(ctx, l.client, l.cloudBase, &session); err != nil {
 		return "", err
 	}
-	l.jar.mu.Lock()
-	session.Cookies = append([]zhidaoCookie(nil), l.jar.records...)
-	l.jar.mu.Unlock()
+	session.Cookies = l.jar.snapshot()
 	data, err := json.Marshal(session)
 	return string(data), err
 }
@@ -184,6 +176,9 @@ func zhidaoRequest(ctx context.Context, client *http.Client, method, endpoint, t
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errors.New("知到连接失败")
 	}
 	defer resp.Body.Close()
@@ -193,7 +188,15 @@ func zhidaoRequest(ctx context.Context, client *http.Client, method, endpoint, t
 	if resp.StatusCode != 200 {
 		return errors.New("知到服务暂未接受请求")
 	}
-	if err = json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(out); err != nil {
+	const maxBody = 8 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errors.New("知到响应读取失败")
+	}
+	if len(data) > maxBody || json.Unmarshal(data, out) != nil {
 		return errors.New("知到返回的数据格式无效")
 	}
 	return nil

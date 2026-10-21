@@ -63,3 +63,16 @@ func TestQRLoginRejectsMissingSessionAndRefusedLogin(t *testing.T) {
 		}
 	}
 }
+
+func TestRainQRRejectsMissingSuccessCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "sessionid", Value: "fixture-session", Path: "/"})
+		w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+	jar, _ := cookiejar.New(nil)
+	flow := &RainLogin{base: srv.URL, client: &http.Client{Jar: jar}, token: "fixture-token"}
+	if _, err := flow.Wait(context.Background()); err == nil {
+		t.Fatal("cookie alone treated as a successful login")
+	}
+}

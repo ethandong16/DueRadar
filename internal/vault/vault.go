@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 )
 
@@ -113,10 +114,13 @@ func (v *Vault) write(config Config) error {
 		return err
 	}
 	data := v.aead.Seal(nonce, nonce, plain, []byte("DueRadar/v1"))
-	f, err := os.OpenFile(v.path+".tmp", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	dir := filepath.Dir(v.path)
+	f, err := os.CreateTemp(dir, ".dueradar-secrets-*.tmp")
 	if err != nil {
 		return err
 	}
+	name := f.Name()
+	defer os.Remove(name)
 	_, err = f.Write(data)
 	if err == nil {
 		err = f.Sync()
@@ -128,8 +132,14 @@ func (v *Vault) write(config Config) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err = os.Rename(v.path+".tmp", v.path); err != nil {
+	if err = os.Rename(name, v.path); err != nil {
 		return err
+	}
+	if runtime.GOOS != "windows" {
+		if d, openErr := os.Open(dir); openErr == nil {
+			_ = d.Sync()
+			_ = d.Close()
+		}
 	}
 	v.config = config
 	return nil
