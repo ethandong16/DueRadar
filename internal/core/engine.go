@@ -475,12 +475,27 @@ func (e *Engine) Pending(now time.Time) []Event {
 
 // PendingWithError reports durable claim failures separately from an idle queue.
 func (e *Engine) PendingWithError(now time.Time) ([]Event, error) {
+	return e.pendingWithLimit(now, 0)
+}
+
+// PendingOneWithError claims only the next due event. Serial transports use it
+// to leave later notifications untouched until they are ready to send them.
+func (e *Engine) PendingOneWithError(now time.Time) ([]Event, error) {
+	return e.pendingWithLimit(now, 1)
+}
+
+func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := cloneState(e.state)
 	changed := false
 	result := []Event{}
-	for i := range s.Events {
+	indices := make([]int, len(s.Events))
+	for i := range indices {
+		indices[i] = i
+	}
+	sort.SliceStable(indices, func(i, j int) bool { return s.Events[indices[i]].DueAt.Before(s.Events[indices[j]].DueAt) })
+	for _, i := range indices {
 		ev := &s.Events[i]
 		if !actionable(*ev) {
 			continue
@@ -548,6 +563,9 @@ func (e *Engine) PendingWithError(now time.Time) ([]Event, error) {
 		}
 		claimed.NextAttemptAt = timePtr(*ev.NextAttemptAt)
 		result = append(result, claimed)
+		if limit > 0 && len(result) >= limit {
+			break
+		}
 	}
 	if changed {
 		if err := e.save(s); err != nil {

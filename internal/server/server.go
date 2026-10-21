@@ -71,7 +71,7 @@ type Server struct {
 	startRain         func(context.Context) (*rainFlow, error)
 	newRain           func(string) rainAdapter
 	sendBark          func(context.Context, string, string, string, string) error
-	deliveryError     string
+	deliveryError     string // Active queue/result persistence error; transport health is derived from durable events.
 	deliveryAt        *time.Time
 	deliveryResult    *deliveryOutcome
 }
@@ -375,7 +375,11 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	deliveryError, deliveryAt := s.deliveryError, s.deliveryAt
 	s.mu.Unlock()
-	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 2, "go_version": runtime.Version(), "message": "普通雨课堂和知到校内课支持扫码绑定；共享课待实测", "notification_error": deliveryError, "notification_last_attempt_at": deliveryAt})
+	health := s.Engine.DeliveryHealth(time.Now())
+	if deliveryError == "" && health.UnresolvedFailures > 0 {
+		deliveryError = "有通知发送失败，请查看发送记录并检查 Bark 配置及网络"
+	}
+	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 2, "go_version": runtime.Version(), "message": "普通雨课堂和知到校内课支持扫码绑定；共享课待实测", "notification_error": deliveryError, "notification_last_attempt_at": deliveryAt, "notification_failure_count": health.UnresolvedFailures, "notification_last_success_at": health.LastSuccessAt})
 }
 
 // Sync and Deliver have separate clocks; slow polling does not postpone known deadlines.
@@ -509,24 +513,33 @@ func (s *Server) Deliver(ctx context.Context) {
 			return
 		}
 	}
-	c := s.Vault.Get()
-	if c.BarkKey == "" {
-		return
-	}
-	events, err := s.Engine.PendingWithError(time.Now())
-	if err != nil {
-		s.setDeliveryError("通知队列保存失败，发送已暂停；请检查数据目录")
-		return
-	}
-	s.setDeliveryError("")
-	for _, event := range events {
+	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if !s.Engine.ClaimStillValid(event.ID, time.Now()) {
+		c := s.Vault.Get()
+		if c.BarkKey == "" {
+			return
+		}
+		events, err := s.Engine.PendingOneWithError(time.Now())
+		if err != nil {
+			s.setDeliveryError("通知队列保存失败，发送已暂停；请检查数据目录")
+			return
+		}
+		s.setDeliveryError("")
+		if len(events) == 0 {
+			return
+		}
+		event := events[0]
+		if ctx.Err() != nil || !s.Engine.ClaimStillValid(event.ID, time.Now()) {
+			s.deliveryResult = &deliveryOutcome{unsent: &event}
+			if err := s.persistDelivery(); err != nil {
+				s.setDeliveryError("通知结果保存失败，发送已暂停；请检查数据目录")
+				return
+			}
 			continue
 		}
-		err := s.sendBark(ctx, c.BarkURL, c.BarkKey, event.Title, event.Body)
+		err = s.sendBark(ctx, c.BarkURL, c.BarkKey, event.Title, event.Body)
 		s.deliveryResult = &deliveryOutcome{id: event.ID, sent: err == nil, at: time.Now()}
 		if persistErr := s.persistDelivery(); persistErr != nil {
 			s.setDeliveryError("通知结果保存失败，发送已暂停；请检查数据目录")

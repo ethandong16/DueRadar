@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ethandong16/due-radar/internal/core"
+	"github.com/ethandong16/due-radar/internal/instance"
 	"github.com/ethandong16/due-radar/internal/server"
 	"github.com/ethandong16/due-radar/internal/vault"
 	"github.com/ethandong16/due-radar/web"
@@ -50,6 +51,11 @@ func main() {
 	if len(os.Getenv("DUERADAR_ADMIN_PASSWORD")) < 12 {
 		log.Fatal("set DUERADAR_ADMIN_PASSWORD to a password of at least 12 characters")
 	}
+	owner, err := instance.Acquire(*dir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer owner.Close()
 	engine, err := core.Open(filepath.Join(*dir, "state.json"))
 	if err != nil {
 		log.Fatal(err)

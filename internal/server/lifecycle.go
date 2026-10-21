@@ -105,9 +105,10 @@ func (s *Server) failRainSync(ctx context.Context, generation uint64, expired bo
 }
 
 type deliveryOutcome struct {
-	id   string
-	sent bool
-	at   time.Time
+	id     string
+	sent   bool
+	at     time.Time
+	unsent *core.Event
 }
 
 // A failed disk commit is retried before sending anything else. Within this
@@ -118,7 +119,9 @@ func (s *Server) persistDelivery() error {
 		return nil
 	}
 	var err error
-	if outcome.sent {
+	if outcome.unsent != nil {
+		err = s.Engine.ReturnUnsent(*outcome.unsent)
+	} else if outcome.sent {
 		err = s.Engine.MarkSent(outcome.id, outcome.at)
 	} else {
 		err = s.Engine.MarkFailed(outcome.id, "通知发送失败", outcome.at)
@@ -127,7 +130,11 @@ func (s *Server) persistDelivery() error {
 		return err
 	}
 	s.mu.Lock()
-	s.deliveryAt = &outcome.at
+	if outcome.unsent == nil {
+		s.deliveryAt = &outcome.at
+	}
+	// Persisted transport outcomes are reflected by DeliveryHealth. Keeping a
+	// cached transport error would outlive task completion or reminder expiry.
 	s.deliveryError = ""
 	s.mu.Unlock()
 	s.deliveryResult = nil

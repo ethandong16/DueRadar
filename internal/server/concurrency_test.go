@@ -408,8 +408,8 @@ func TestDeliveredOutcomeRetriesPersistenceBeforeAnotherPush(t *testing.T) {
 	}
 	restore()
 	s.Deliver(context.Background())
-	if sends != 1 || s.deliveryResult != nil {
-		t.Fatal("outcome was resent instead of persisted")
+	if sends != 2 || s.deliveryResult != nil {
+		t.Fatal("persisted outcome was resent or next unclaimed event was not delivered")
 	}
 	sent := 0
 	for _, event := range s.Engine.Snapshot().Events {
@@ -417,7 +417,7 @@ func TestDeliveredOutcomeRetriesPersistenceBeforeAnotherPush(t *testing.T) {
 			sent++
 		}
 	}
-	if sent != 1 {
+	if sent != 2 {
 		t.Fatal("successful outcome missing from durable state")
 	}
 }

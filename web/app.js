@@ -300,7 +300,7 @@
     const runtime = state.runtime || {};
     const uptime = Number.isFinite(runtime.uptime_seconds) ? `${Math.floor(runtime.uptime_seconds / 3600)} 小时 ${Math.floor(runtime.uptime_seconds % 3600 / 60)} 分钟` : "未知";
     const interval = Number.isFinite(runtime.scheduler_interval_seconds) ? `每 ${runtime.scheduler_interval_seconds} 秒` : "未知";
-    for (const [label, value] of [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["通知运行状态", runtime.notification_error || "正常"]]) { const card = node("article", "runtime-card"); card.append(node("span", "", label), node("strong", "", value)); $("runtime-grid").append(card); }
+    for (const [label, value] of [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["通知运行状态", runtime.notification_error || "正常"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"]]) { const card = node("article", "runtime-card"); card.append(node("span", "", label), node("strong", "", value)); $("runtime-grid").append(card); }
     $("version").textContent = runtime.version ? `· ${runtime.version}` : "";
     try { $("today").textContent = new Intl.DateTimeFormat("zh-CN", { dateStyle: "full", timeZone: settings.timezone || "Asia/Shanghai" }).format(new Date()); } catch { $("today").textContent = new Date().toLocaleDateString("zh-CN"); }
     updateFilterTabs(); renderTasks(); renderPlatforms(); renderEvents();
