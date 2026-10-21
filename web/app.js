@@ -16,6 +16,7 @@
   let state = null;
   let currentView = "tasks";
   let statusFilter = "all";
+  let taskPage = 1;
   let toastTimer;
   let authenticated = false;
   let loading = false;
@@ -109,18 +110,21 @@
     const tasks = state.tasks || [];
     const query = $("task-search").value.trim().toLocaleLowerCase();
     const platform = $("platform-filter").value;
-    const filtered = tasks.filter((task) => (statusFilter === "all" || task.status === statusFilter) && (platform === "all" || task.platform === platform) && (!query || `${task.title || ""} ${task.course || ""} ${platformName(task.platform)}`.toLocaleLowerCase().includes(query))).sort((a, b) => {
-      if ((a.status === "completed") !== (b.status === "completed")) return a.status === "completed" ? 1 : -1;
-      return (timestamp(a.due_at)?.getTime() ?? Infinity) - (timestamp(b.due_at)?.getTime() ?? Infinity);
-    });
+    const filtered = DueRadarTasks.select(tasks, { status: statusFilter, platform, query, kind: $("kind-filter").value, timing: $("deadline-filter").value, platformLabel: platformName });
+    const page = DueRadarTasks.paginate(filtered, taskPage);
+    taskPage = page.page;
+    $("task-pagination").hidden = filtered.length === 0;
+    $("task-page-label").textContent = `显示 ${page.start}–${page.end} 项，共 ${page.total} 项 · 第 ${page.page}/${page.pages} 页`;
+    $("task-prev").disabled = page.page <= 1;
+    $("task-next").disabled = page.page >= page.pages;
     $("task-count").textContent = filtered.length;
     $("task-list").replaceChildren();
     if (!filtered.length) {
-      $("task-list").append(tasks.length ? emptyState("没有符合筛选条件的任务", "试着切换任务状态、平台，或使用其他搜索关键词。", { label: "清除筛选", run: () => { statusFilter = "all"; $("task-search").value = ""; $("platform-filter").value = "all"; updateFilterTabs(); renderTasks(); } }) : emptyState("还没有学习任务", "平台首次成功同步后，作业、考试与视频截止信息会集中出现在这里。", { label: "查看平台接入状态 →", run: () => changeView("accounts") }));
+      $("task-list").append(tasks.length ? emptyState("没有符合筛选条件的任务", "试着切换任务状态、平台、类型或截止时间。", { label: "清除筛选", run: () => { statusFilter = "all"; taskPage = 1; $("task-search").value = ""; for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all"; updateFilterTabs(); renderTasks(); } }) : emptyState("还没有学习任务", "平台首次成功同步后，作业、考试与视频截止信息会集中出现在这里。", { label: "查看平台接入状态 →", run: () => changeView("accounts") }));
       return;
     }
     const fragment = document.createDocumentFragment();
-    for (const task of filtered) {
+    for (const task of page.items) {
       const card = node("article", "task-item");
       const kind = Object.hasOwn(kindNames, task.kind) ? task.kind : "homework";
       const icon = node("div", `task-kind-icon ${kind}`, { homework: "▤", exam: "◇", chapter: "▥", video: "▷" }[kind]); icon.setAttribute("aria-hidden", "true");
@@ -139,13 +143,15 @@
         } else main.append(node("p", "progress-label", "学习进度未知"));
       }
       main.title = `最近观测：${formatDate(task.last_seen_at)}`;
+      const source = DueRadarTasks.safeSource(task.source_url);
+      if (source) { const link = node("a", "task-source", "打开课程平台 ↗"); link.href = source; link.target = "_blank"; link.rel = "noopener noreferrer"; main.append(link); }
       const deadline = deadlineLabel(task);
       const time = node("div", "task-deadline"); time.append(node("div", `deadline-main${deadline.urgent ? " urgent" : ""}`, deadline.main), node("div", "deadline-sub", deadline.sub));
       card.append(icon, main, time); fragment.append(card);
     }
     $("task-list").append(fragment);
   }
-  function updateFilterTabs() { document.querySelectorAll("[data-status]").forEach((button) => { const active = button.dataset.status === statusFilter; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); }); }
+  function updateFilterTabs() { document.querySelectorAll("[data-status]").forEach((button) => { const active = button.dataset.status === statusFilter; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); const status = button.dataset.status; const count = (state?.tasks || []).filter(task => status === "all" || task.status === status).length; button.textContent = `${status === "all" ? "全部" : taskStatus[status][0]} ${count}`; }); }
   function renderPlatforms() {
     $("platform-list").replaceChildren();
     if (!state.platforms.length) { $("platform-list").append(emptyState("暂无平台信息", "服务尚未返回平台状态，请稍后刷新运行状态。")); return; }
@@ -235,6 +241,9 @@
     const tasks = state.tasks;
     const pending = tasks.filter((task) => task.status === "pending");
     $("stat-pending").textContent = pending.length;
+    const overdue = pending.filter(task => DueRadarTasks.timeGroup(task, Date.now()) === "overdue").length;
+    const noDue = pending.filter(task => DueRadarTasks.timeGroup(task, Date.now()) === "no_due").length;
+    $("pending-detail").textContent = `${overdue} 项已过截止 · ${noDue} 项截止未知`;
     $("nav-count").textContent = pending.length;
     $("stat-soon").textContent = pending.filter((task) => { const due = timestamp(task.due_at)?.getTime(); return due && due > Date.now() && due - Date.now() <= 86400000; }).length;
     $("stat-completed").textContent = tasks.filter((task) => task.status === "completed").length;
@@ -268,7 +277,7 @@
     for (const [label, value] of [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["通知运行状态", runtime.notification_error || "正常"]]) { const card = node("article", "runtime-card"); card.append(node("span", "", label), node("strong", "", value)); $("runtime-grid").append(card); }
     $("version").textContent = runtime.version ? `· ${runtime.version}` : "";
     try { $("today").textContent = new Intl.DateTimeFormat("zh-CN", { dateStyle: "full", timeZone: settings.timezone || "Asia/Shanghai" }).format(new Date()); } catch { $("today").textContent = new Date().toLocaleDateString("zh-CN"); }
-    renderTasks(); renderPlatforms(); renderEvents();
+    updateFilterTabs(); renderTasks(); renderPlatforms(); renderEvents();
   }
   async function refreshState(showSuccess = false) {
     if (loading) return;
@@ -300,9 +309,11 @@
 
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => changeView(button.dataset.view)));
   window.addEventListener("hashchange", () => changeView(location.hash.slice(1), false));
-  document.querySelectorAll("[data-status]").forEach((button) => button.addEventListener("click", () => { statusFilter = button.dataset.status; updateFilterTabs(); renderTasks(); }));
-  $("task-search").addEventListener("input", renderTasks);
-  $("platform-filter").addEventListener("change", renderTasks);
+  document.querySelectorAll("[data-status]").forEach((button) => button.addEventListener("click", () => { statusFilter = button.dataset.status; taskPage = 1; updateFilterTabs(); renderTasks(); }));
+  $("task-search").addEventListener("input", () => { taskPage = 1; renderTasks(); });
+  for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).addEventListener("change", () => { taskPage = 1; renderTasks(); });
+  $("task-prev").addEventListener("click", () => { taskPage--; renderTasks(); $("task-heading").scrollIntoView({ block: "start" }); });
+  $("task-next").addEventListener("click", () => { taskPage++; renderTasks(); $("task-heading").scrollIntoView({ block: "start" }); });
   $("settings-form").addEventListener("input", () => { settingsDirty = true; });
   $("bark-form").addEventListener("input", () => { barkDirty = true; });
   $("login-form").addEventListener("submit", async (event) => {
