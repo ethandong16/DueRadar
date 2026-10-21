@@ -1,0 +1,421 @@
+package server
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"io/fs"
+	"net"
+	"net/http"
+	"net/url"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/ethandong16/due-radar/internal/bark"
+	"github.com/ethandong16/due-radar/internal/core"
+	"github.com/ethandong16/due-radar/internal/platform"
+	"github.com/ethandong16/due-radar/internal/vault"
+)
+
+const Version = "0.1.0-dev"
+
+type session struct{ expires time.Time }
+type attempt struct {
+	count int
+	since time.Time
+}
+type Server struct {
+	Engine        *core.Engine
+	Vault         *vault.Vault
+	Demo          bool
+	SecureCookies bool
+	password      [32]byte
+	started       time.Time
+	mu            sync.Mutex
+	sessions      map[string]session
+	attempts      map[string]attempt
+	syncMu        sync.Mutex
+	notifyMu      sync.Mutex
+	lastTestAt    *time.Time
+	lastTestError string
+}
+
+func New(engine *core.Engine, credentials *vault.Vault, password string, demo, secure bool) (*Server, error) {
+	if len(password) < 12 {
+		return nil, errors.New("DUERADAR_ADMIN_PASSWORD must contain at least 12 characters")
+	}
+	return &Server{Engine: engine, Vault: credentials, Demo: demo, SecureCookies: secure, password: sha256.Sum256([]byte(password)), started: time.Now(), sessions: map[string]session{}, attempts: map[string]attempt{}}, nil
+}
+
+func (s *Server) Handler(files fs.FS) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, map[string]string{"status": "ok"}) })
+	mux.HandleFunc("POST /api/login", s.login)
+	mux.HandleFunc("GET /api/session", s.protected(func(w http.ResponseWriter, r *http.Request) {
+		jsonResponse(w, 200, map[string]bool{"authenticated": true})
+	}))
+	mux.HandleFunc("POST /api/logout", s.protected(s.logout))
+	mux.HandleFunc("GET /api/tasks", s.protected(func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, s.Engine.Snapshot().Tasks) }))
+	mux.HandleFunc("GET /api/accounts", s.protected(s.accounts))
+	mux.HandleFunc("GET /api/settings", s.protected(func(w http.ResponseWriter, r *http.Request) {
+		settings := s.Engine.Snapshot().Settings
+		jsonResponse(w, 200, settings)
+	}))
+	mux.HandleFunc("PUT /api/settings", s.protected(s.settings))
+	mux.HandleFunc("GET /api/bark", s.protected(s.getBark))
+	mux.HandleFunc("PUT /api/bark", s.protected(s.setBark))
+	mux.HandleFunc("POST /api/bark/test", s.protected(s.testBark))
+	mux.HandleFunc("GET /api/events", s.protected(func(w http.ResponseWriter, r *http.Request) {
+		events := s.Engine.Snapshot().Events
+		sort.SliceStable(events, func(i, j int) bool { return events[i].CreatedAt.After(events[j].CreatedAt) })
+		if len(events) > 200 {
+			events = events[:200]
+		}
+		jsonResponse(w, 200, events)
+	}))
+	mux.HandleFunc("GET /api/status", s.protected(s.status))
+	mux.HandleFunc("POST /api/sync", s.protected(func(w http.ResponseWriter, r *http.Request) {
+		if !s.Demo {
+			fail(w, 409, platform.ErrNotValidated.Error())
+			return
+		}
+		if err := s.Sync(r.Context()); err != nil {
+			fail(w, 500, "示例同步失败")
+			return
+		}
+		jsonResponse(w, 200, map[string]string{"message": "示例任务已同步"})
+	}))
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "接口不存在") })
+	mux.Handle("/", http.FileServer(http.FS(files)))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != "GET" && r.Method != "HEAD" {
+			// Reject cross-site browser mutations, including login CSRF. CLI calls
+			// without Origin are allowed; authenticated cookies remain mandatory.
+			if origin := r.Header.Get("Origin"); origin != "" {
+				u, err := url.Parse(origin)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !strings.EqualFold(u.Host, r.Host) {
+					fail(w, 403, "请求来源不匹配")
+					return
+				}
+			}
+			if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+				fail(w, 403, "请求来源不匹配")
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+func jsonResponse(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+func fail(w http.ResponseWriter, status int, message string) {
+	jsonResponse(w, status, map[string]string{"error": message})
+}
+func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+		fail(w, 415, "请使用 application/json")
+		return false
+	}
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	d.DisallowUnknownFields()
+	if err := d.Decode(v); err != nil {
+		fail(w, 400, "JSON 格式或字段无效")
+		return false
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF {
+		fail(w, 400, "请求包含多余或过大的数据")
+		return false
+	}
+	return true
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Password string `json:"password"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	now := time.Now()
+	s.mu.Lock()
+	for k, a := range s.attempts {
+		if now.Sub(a.since) > 15*time.Minute {
+			delete(s.attempts, k)
+		}
+	}
+	a := s.attempts[ip]
+	if a.count >= 10 || len(s.attempts) >= 2048 {
+		s.mu.Unlock()
+		fail(w, 429, "尝试次数过多，请 15 分钟后重试")
+		return
+	}
+	if a.since.IsZero() {
+		a.since = now
+	}
+	a.count++
+	s.attempts[ip] = a
+	s.mu.Unlock()
+	hash := sha256.Sum256([]byte(input.Password))
+	if subtle.ConstantTimeCompare(hash[:], s.password[:]) != 1 {
+		fail(w, 401, "管理密码不正确")
+		return
+	}
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		fail(w, 500, "会话创建失败")
+		return
+	}
+	token := hex.EncodeToString(tokenBytes)
+	s.mu.Lock()
+	delete(s.attempts, ip)
+	for k, v := range s.sessions {
+		if !v.expires.After(now) {
+			delete(s.sessions, k)
+		}
+	}
+	if len(s.sessions) >= 128 {
+		s.mu.Unlock()
+		fail(w, 429, "会话数量已达上限")
+		return
+	}
+	s.sessions[token] = session{now.Add(12 * time.Hour)}
+	s.mu.Unlock()
+	http.SetCookie(w, &http.Cookie{Name: "dueradar_session", Value: token, Path: "/", HttpOnly: true, Secure: s.SecureCookies, SameSite: http.SameSiteStrictMode, MaxAge: 43200})
+	jsonResponse(w, 200, map[string]bool{"authenticated": true})
+}
+
+func (s *Server) protected(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie("dueradar_session")
+		if err != nil {
+			fail(w, 401, "请先登录管理页面")
+			return
+		}
+		s.mu.Lock()
+		v, ok := s.sessions[c.Value]
+		if ok && !v.expires.After(time.Now()) {
+			delete(s.sessions, c.Value)
+			ok = false
+		}
+		s.mu.Unlock()
+		if !ok {
+			fail(w, 401, "管理会话已过期，请重新登录")
+			return
+		}
+		next(w, r)
+	}
+}
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie("dueradar_session"); err == nil {
+		s.mu.Lock()
+		delete(s.sessions, c.Value)
+		s.mu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{Name: "dueradar_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.SecureCookies, SameSite: http.SameSiteStrictMode})
+	jsonResponse(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
+	type view struct {
+		core.Account
+		Name    string `json:"name"`
+		Ready   bool   `json:"ready"`
+		Message string `json:"message"`
+	}
+	out := []view{}
+	for _, capability := range platform.Capabilities() {
+		for _, a := range s.Engine.Snapshot().Accounts {
+			if a.Platform == capability.ID {
+				if s.Demo {
+					a.LoginState = "demo"
+					a.SyncState = "demo"
+				}
+				out = append(out, view{a, capability.Name, capability.Ready, capability.Message})
+			}
+		}
+	}
+	jsonResponse(w, 200, out)
+}
+func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
+	var settings core.Settings
+	if !decode(w, r, &settings) {
+		return
+	}
+	if err := s.Engine.UpdateSettings(settings); err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	jsonResponse(w, 200, settings)
+}
+func (s *Server) getBark(w http.ResponseWriter, r *http.Request) {
+	c := s.Vault.Get()
+	if c.BarkURL == "" {
+		c.BarkURL = "https://api.day.app"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	jsonResponse(w, 200, map[string]any{"server": c.BarkURL, "configured": c.BarkKey != "", "last_test_at": s.lastTestAt, "last_error": s.lastTestError})
+}
+func (s *Server) setBark(w http.ResponseWriter, r *http.Request) {
+	if s.Demo {
+		fail(w, 409, "演示模式不保存通知凭据")
+		return
+	}
+	var input struct {
+		Server string `json:"server"`
+		Key    string `json:"key"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	old := s.Vault.Get()
+	if input.Key == "" {
+		if input.Server != old.BarkURL && old.BarkKey != "" {
+			fail(w, 400, "修改 Bark 服务地址时请重新填写 Key")
+			return
+		}
+		input.Key = old.BarkKey
+	}
+	if err := bark.Validate(input.Server, input.Key); err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	if err := s.Vault.Set(vault.Config{BarkURL: input.Server, BarkKey: input.Key}); err != nil {
+		fail(w, 500, "通知配置保存失败")
+		return
+	}
+	s.getBark(w, r)
+}
+func (s *Server) testBark(w http.ResponseWriter, r *http.Request) {
+	if s.Demo {
+		fail(w, 409, "演示模式不发送真实通知")
+		return
+	}
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	c := s.Vault.Get()
+	err := bark.Send(r.Context(), c.BarkURL, c.BarkKey, "DueRadar 测试通知", "提醒服务已连接，学习任务将按你的规则通知。")
+	now := time.Now()
+	s.mu.Lock()
+	s.lastTestAt = &now
+	s.lastTestError = ""
+	if err != nil {
+		s.lastTestError = err.Error()
+	}
+	s.mu.Unlock()
+	if err != nil {
+		fail(w, 502, err.Error())
+		return
+	}
+	jsonResponse(w, 200, map[string]string{"message": "Bark 已接受测试通知"})
+}
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 0, "go_version": runtime.Version(), "message": "平台登录与任务采集待真实会话验证"})
+}
+
+// Sync and Deliver have separate clocks; slow polling does not postpone known deadlines.
+func (s *Server) Sync(ctx context.Context) error {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	if !s.Demo {
+		return nil
+	}
+	return s.seedDemo(time.Now())
+}
+func (s *Server) Deliver(ctx context.Context) {
+	if s.Demo {
+		return
+	}
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	c := s.Vault.Get()
+	if c.BarkKey == "" {
+		return
+	}
+	for _, event := range s.Engine.Pending(time.Now()) {
+		err := bark.Send(ctx, c.BarkURL, c.BarkKey, event.Title, event.Body)
+		if err != nil {
+			_ = s.Engine.MarkFailed(event.ID, err.Error(), time.Now())
+		} else {
+			_ = s.Engine.MarkSent(event.ID, time.Now())
+		}
+	}
+}
+func (s *Server) Run(ctx context.Context) {
+	go func() {
+		_ = s.Sync(ctx)
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = s.Sync(ctx)
+			}
+		}
+	}()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.Deliver(ctx)
+		}
+	}
+}
+
+func (s *Server) seedDemo(now time.Time) error {
+	state := s.Engine.Snapshot()
+	if len(state.Tasks) > 0 {
+		for _, p := range []string{core.PlatformRain, core.PlatformZhidaoShared, core.PlatformZhidaoCampus} {
+			tasks := []core.Task{}
+			for _, t := range state.Tasks {
+				if t.Platform == p {
+					tasks = append(tasks, t)
+				}
+			}
+			if err := s.Engine.Sync(p, tasks, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	end := now.Add(26 * time.Hour)
+	examStart := now.Add(50 * time.Hour)
+	examEnd := examStart.Add(2 * time.Hour)
+	videoEnd := now.Add(5 * 24 * time.Hour)
+	progress := 62.5
+	items := map[string][]core.Task{
+		core.PlatformRain:         {{ID: "demo-homework", Title: "第三章 · 极限与连续", Course: "高等数学 A", Kind: "homework", Status: "pending", EndAt: &end, SourceTimezone: "Asia/Shanghai"}, {ID: "demo-exam", Title: "期中测验", Course: "大学物理", Kind: "exam", Status: "pending", StartAt: &examStart, EndAt: &examEnd, SourceTimezone: "Asia/Shanghai"}},
+		core.PlatformZhidaoShared: {{ID: "demo-video", Title: "本周视频学习", Course: "中国传统文化", Kind: "video", Status: "pending", EndAt: &videoEnd, Progress: &progress, SourceTimezone: "Asia/Shanghai"}},
+		core.PlatformZhidaoCampus: {{ID: "demo-done", Title: "第二章自测", Course: "程序设计基础", Kind: "chapter", Status: "completed", EndAt: &end}, {ID: "demo-unknown", Title: "课程实践安排", Course: "创新创业基础", Kind: "homework", Status: "unknown"}},
+	}
+	for _, p := range []string{core.PlatformRain, core.PlatformZhidaoShared, core.PlatformZhidaoCampus} {
+		if err := s.Engine.Sync(p, items[p], now); err != nil {
+			return err
+		}
+	}
+	return nil
+}

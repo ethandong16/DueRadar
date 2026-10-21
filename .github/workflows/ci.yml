@@ -1,0 +1,38 @@
+name: verify
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: test -z "$(gofmt -l cmd internal web)"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - name: Cross compile Linux targets
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64 arm; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch GOARM=7 go build -trimpath -ldflags="-s -w" -o dist/dueradar-linux-$arch ./cmd/dueradar
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dueradar-linux
+          path: dist/
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64,linux/arm64,linux/arm/v7

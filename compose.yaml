@@ -1,0 +1,21 @@
+services:
+  dueradar:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      DUERADAR_ADMIN_PASSWORD: ${DUERADAR_ADMIN_PASSWORD:?Set an admin password with at least 12 characters}
+      DUERADAR_SECURE_COOKIES: ${DUERADAR_SECURE_COOKIES:-false}
+    volumes:
+      - dueradar-data:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "3"
+volumes:
+  dueradar-data:

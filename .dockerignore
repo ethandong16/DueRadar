@@ -1,0 +1,7 @@
+.git
+.local
+artifacts
+data
+dist
+.env*
+node_modules
