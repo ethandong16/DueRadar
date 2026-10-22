@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -101,6 +102,31 @@ func TestAdminSessionLastsFifteenDaysAndSurvivesRestart(t *testing.T) {
 	againHandler := again.Handler(fstest.MapFS{"index.html": {Data: []byte("DueRadar")}})
 	if w := request(againHandler, "GET", "/api/session", "", cookie, ""); w.Code != 401 {
 		t.Fatalf("logged-out session persisted: %d", w.Code)
+	}
+}
+
+func TestSessionCapEvictsOldestInsteadOfBlockingLogin(t *testing.T) {
+	s, h, _ := sessionApp(t)
+	now := time.Now()
+	oldest := sessionKey("oldest")
+	s.mu.Lock()
+	s.sessions[oldest] = session{expires: now.Add(time.Minute)}
+	for i := 1; i < 128; i++ {
+		s.sessions[sessionKey(fmt.Sprintf("filler-%d", i))] = session{expires: now.Add(time.Duration(i+1) * time.Minute)}
+	}
+	s.mu.Unlock()
+
+	loginCookie(t, h)
+
+	s.mu.Lock()
+	count := len(s.sessions)
+	_, oldestRetained := s.sessions[oldest]
+	s.mu.Unlock()
+	if count != 128 {
+		t.Fatalf("session count = %d", count)
+	}
+	if oldestRetained {
+		t.Fatal("oldest session was not evicted")
 	}
 }
 

@@ -237,10 +237,17 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			delete(s.sessions, k)
 		}
 	}
+	// Long-lived sessions accumulate; evict the oldest instead of locking the
+	// administrator out once the cap is reached.
 	if len(s.sessions) >= 128 {
-		s.mu.Unlock()
-		fail(w, 429, "会话数量已达上限")
-		return
+		oldestKey := ""
+		var oldestExpiry time.Time
+		for key, value := range s.sessions {
+			if oldestKey == "" || value.expires.Before(oldestExpiry) {
+				oldestKey, oldestExpiry = key, value.expires
+			}
+		}
+		delete(s.sessions, oldestKey)
 	}
 	s.sessions[sessionKey(token)] = session{now.Add(sessionLifetime)}
 	s.persistSessionsLocked()
