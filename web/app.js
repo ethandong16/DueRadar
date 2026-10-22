@@ -103,7 +103,8 @@
   function emptyState(title, message, action) {
     const wrap = node("div", "empty-state");
     const icon = node("span", "empty-icon", "◎"); icon.setAttribute("aria-hidden", "true");
-    wrap.append(icon, node("h3", "", title), node("p", "", message));
+    wrap.append(icon, node("h3", "", title));
+    if (message) wrap.append(node("p", "", message));
     if (action) { const button = node("button", "button secondary", action.label); button.type = "button"; button.addEventListener("click", action.run); wrap.append(button); }
     return wrap;
   }
@@ -136,11 +137,11 @@
       const scoped = DueRadarTasks.scopeTasks(tasks, { scope, timezone: zone });
       const hiddenHistory = DueRadarTasks.scopeTasks(tasks, { scope: "all", timezone: zone }).length > DueRadarTasks.scopeTasks(tasks, { scope: "current", timezone: zone }).length;
       if (scope === "current" && hiddenHistory) {
-        $("task-list").append(emptyState("本学期暂无任务", "上学期的课程与课程视频已默认收起，可以展开查看。", { label: "查看历史学期", run: () => { $("scope-filter").value = "all"; taskPage = 1; render(); } }));
+        $("task-list").append(emptyState("本学期暂无任务", "", { label: "查看历史学期", run: () => { $("scope-filter").value = "all"; taskPage = 1; render(); } }));
       } else if (scoped.length) {
-        $("task-list").append(emptyState("没有符合筛选条件的任务", "试着切换任务状态、平台、类型或截止时间。", { label: "清除筛选", run: () => { statusFilter = "all"; taskPage = 1; $("task-search").value = ""; for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all"; $("scope-filter").value = "current"; render(); } }));
+        $("task-list").append(emptyState("没有符合筛选条件的任务", "", { label: "清除筛选", run: () => { statusFilter = "all"; taskPage = 1; $("task-search").value = ""; for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all"; $("scope-filter").value = "current"; render(); } }));
       } else {
-        $("task-list").append(emptyState("还没有学习任务", "平台首次成功同步后，作业、考试与视频截止信息会集中出现在这里。", { label: "查看平台接入状态 →", run: () => changeView("accounts") }));
+        $("task-list").append(emptyState("还没有学习任务", "同步成功后显示作业、考试和视频。", { label: "查看平台接入状态 →", run: () => changeView("accounts") }));
       }
       return;
     }
@@ -175,12 +176,12 @@
   function updateFilterTabs() { const scoped = DueRadarTasks.scopeTasks(state?.tasks || [], { scope: $("scope-filter").value, timezone: state?.settings?.timezone || defaults.timezone }); document.querySelectorAll("[data-status]").forEach((button) => { const active = button.dataset.status === statusFilter; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); const status = button.dataset.status; const count = scoped.filter(task => status === "all" || task.status === status).length; button.textContent = `${status === "all" ? "全部" : taskStatus[status][0]} ${count}`; }); }
   function renderPlatforms() {
     $("platform-list").replaceChildren();
-    if (!state.platforms.length) { $("platform-list").append(emptyState("暂无平台信息", "服务尚未返回平台状态，请稍后刷新运行状态。")); return; }
+    if (!state.platforms.length) { $("platform-list").append(emptyState("暂无平台信息", "")); return; }
     for (const platform of state.platforms) {
       const card = node("article", "platform-card");
-      card.append(node("div", "platform-avatar", (platform.name || "课").slice(0, 1)), node("h2", "", platform.name || platform.id), node("p", "platform-subtitle", "登录与采集分别验证"));
+      card.append(node("div", "platform-avatar", (platform.name || "课").slice(0, 1)), node("h2", "", platform.name || platform.id));
       for (const [label, mapping, value] of [["账号状态", loginStatuses, platform.login_status], ["同步状态", syncStatuses, platform.sync_status]]) { const row = node("div", "platform-status"); row.append(node("span", "", label), badge(...cleanStatus(mapping, value))); card.append(row); }
-      card.append(node("p", "platform-message", platform.message || "平台登录与任务读取待验证，当前没有已确认的真实会话。"));
+      card.append(node("p", "platform-message", platform.message || "待验证"));
       card.append(node("p", "platform-date", `最近成功同步：${timestamp(platform.last_success) ? formatDate(platform.last_success) : "尚无成功记录"}`));
       if (Number(platform.failures) > 0) card.append(node("p", "platform-date", `连续失败：${Number(platform.failures)} 轮`));
       if (["rain", "zhidao_campus"].includes(platform.id) && platform.ready && !state.demo) {
@@ -338,8 +339,8 @@
     if (ids.has(selectedPlatform)) $("platform-filter").value = selectedPlatform;
     $("demo-banner").hidden = !state.demo;
     const settings = state.settings || defaults;
-    $("quiet-title").textContent = settings.quiet_enabled ? "安静的夜晚，及时的提醒" : "提醒照常，关注每个节点";
-    $("quiet-summary").textContent = settings.quiet_enabled ? `${settings.quiet_start}—${settings.quiet_end} 为静默时段。普通提醒延后，后台同步照常运行。时区：${settings.timezone}。` : `静默时段已关闭。所有有效提醒按配置时间发送。时区：${settings.timezone}。`;
+    $("quiet-title").textContent = settings.quiet_enabled ? "静默时段已开启" : "静默时段已关闭";
+    $("quiet-summary").textContent = settings.quiet_enabled ? `${settings.quiet_start}—${settings.quiet_end}，普通提醒延后。时区：${settings.timezone}。` : `所有提醒按配置时间发送。时区：${settings.timezone}。`;
     if (!settingsDirty) populateSettings(settings);
     const barkConfigured = Boolean(state.bark?.configured);
     $("bark-status").textContent = barkConfigured ? "已配置" : "未配置";
@@ -431,7 +432,7 @@
   });
   $("logout").addEventListener("click", (event) => busy(event.currentTarget, async () => { authGeneration++; clearActiveLogin(); await api("/api/logout", "POST"); showLogin(); $("login-password").focus(); }));
   $("refresh").addEventListener("click", (event) => busy(event.currentTarget, () => refreshState(true)));
-  $("sync").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/sync", "POST"); if (await refreshState()) notify(result.message || "同步请求已处理，实际采集结果请查看平台状态。"); }));
+  $("sync").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/sync", "POST"); if (await refreshState()) notify(result.message || "已开始同步。"); }));
   $("bark-form").addEventListener("submit", (event) => {
     event.preventDefault(); busy(event.submitter || $("bark-form").querySelector("button"), async () => {
       const server = $("bark-server").value.trim(); const key = $("bark-key").value.trim();
@@ -440,9 +441,9 @@
       await api("/api/bark", "PUT", { server, key }); barkDirty = false; $("bark-key").value = ""; if (await refreshState()) notify("Bark 配置已保存。");
     });
   });
-  $("bark-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/bark/test", "POST"); notify(result.message || "Bark 服务已接受测试通知，请检查 iPhone。"); }));
-  $("in-class-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/in-class/test", "POST"); notify(result.message || "课上答题测试通知已发送，请检查 iPhone。"); }));
-  $("settings-defaults").addEventListener("click", () => { populateSettings(defaults); settingsDirty = true; notify("已填入默认值，点击保存提醒规则后生效。"); });
+  $("bark-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/bark/test", "POST"); notify(result.message || "测试通知已发送。"); }));
+  $("in-class-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/in-class/test", "POST"); notify(result.message || "测试通知已发送。"); }));
+  $("settings-defaults").addEventListener("click", () => { populateSettings(defaults); settingsDirty = true; notify("已填入默认值，保存后生效。"); });
   $("settings-form").addEventListener("submit", (event) => {
     event.preventDefault(); busy(event.submitter || $("settings-form").querySelector("button"), async () => {
       const pollSeconds = Number.parseInt($("in-class-poll").value, 10);
