@@ -1,6 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { select, paginate, safeSource, timeGroup } = require("./tasks.js");
+const { select, paginate, safeSource, timeGroup, semester, scopeTasks } = require("./tasks.js");
 const now = Date.parse("2026-10-22T10:00:00+08:00");
 const fixture = [
   { id:"old", status:"pending", kind:"homework", platform:"rain", title:"Old work", due_at:"2026-09-01T00:00:00+08:00" },
@@ -29,4 +29,30 @@ test("paging covers all tasks once and clamps after a shrinking snapshot", () =>
 test("task links allow HTTPS and reject script, file and credential URLs", () => {
   assert.equal(safeSource("https://www.yuketang.cn/v2/web/index"),"https://www.yuketang.cn/v2/web/index");
   for(const value of ["javascript:alert(1)","file:///secret","https://user:pass@example.com","/relative",null]) assert.equal(safeSource(value),null);
+});
+const termFixture = [
+  { id:"old-hw", status:"completed", kind:"homework", platform:"zhidao_campus", course:"2025-2026-2高等数学", title:"Old homework", due_at:"2026-06-01T23:59:00+08:00" },
+  { id:"old-video", status:"completed", kind:"video", platform:"zhidao_campus", course:"2025-2026-2高等数学", title:"Old video", due_at:null },
+  { id:"new-hw", status:"pending", kind:"homework", platform:"zhidao_campus", course:"概率论与数理统计B-202609", title:"New homework", due_at:"2026-11-08T23:30:00+08:00" },
+  { id:"new-video", status:"pending", kind:"video", platform:"zhidao_campus", course:"概率论与数理统计B-202609", title:"New video", due_at:null },
+  { id:"undated", status:"pending", kind:"exam", platform:"rain", course:"毛泽东思想", title:"Undated exam", due_at:null },
+  { id:"named-old", status:"pending", kind:"video", platform:"zhidao_campus", course:"2024-2025-1大学物理", title:"Old named video", due_at:null },
+  { id:"retake", status:"pending", kind:"homework", platform:"zhidao_campus", course:"2025-2026-2线性代数", title:"Current retake", due_at:"2026-10-30T23:59:00+08:00" },
+];
+test("last semester courses and their undated videos are hidden by default", () => {
+  assert.deepEqual(scopeTasks(termFixture,{now}).map(t=>t.id).sort(), ["new-hw","new-video","retake","undated"]);
+  assert.deepEqual(select(termFixture,{now,kind:"video"}).map(t=>t.id), ["new-video"]);
+  assert.equal(scopeTasks(termFixture,{now,scope:"all"}).length, termFixture.length);
+});
+test("dates outrank course names and unknown courses stay visible", () => {
+  assert.ok(scopeTasks(termFixture,{now}).some(t=>t.id==="retake"));
+  assert.ok(scopeTasks(termFixture,{now}).some(t=>t.id==="undated"));
+  assert.equal(scopeTasks([{ id:"empty", platform:"rain", course:"无日期课程", status:"pending", kind:"video" }],{now}).length,1);
+});
+test("academic terms roll over in September and February", () => {
+  const start = (value) => semester(Date.parse(value)).start;
+  assert.equal(start("2026-09-01T12:00:00+08:00"), new Date(2026,8,1).getTime());
+  assert.equal(start("2026-08-31T12:00:00+08:00"), new Date(2026,1,15).getTime());
+  assert.equal(start("2027-01-10T12:00:00+08:00"), new Date(2026,8,1).getTime());
+  assert.equal(start("2027-02-20T12:00:00+08:00"), new Date(2027,1,15).getTime());
 });

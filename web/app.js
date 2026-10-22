@@ -121,7 +121,8 @@
     const tasks = state.tasks || [];
     const query = $("task-search").value.trim().toLocaleLowerCase();
     const platform = $("platform-filter").value;
-    const filtered = DueRadarTasks.select(tasks, { status: statusFilter, platform, query, kind: $("kind-filter").value, timing: $("deadline-filter").value, platformLabel: platformName });
+    const scope = $("scope-filter").value;
+    const filtered = DueRadarTasks.select(tasks, { status: statusFilter, platform, query, kind: $("kind-filter").value, timing: $("deadline-filter").value, scope, platformLabel: platformName });
     const page = DueRadarTasks.paginate(filtered, taskPage);
     taskPage = page.page;
     $("task-pagination").hidden = filtered.length === 0;
@@ -131,7 +132,15 @@
     $("task-count").textContent = filtered.length;
     $("task-list").replaceChildren();
     if (!filtered.length) {
-      $("task-list").append(tasks.length ? emptyState("没有符合筛选条件的任务", "试着切换任务状态、平台、类型或截止时间。", { label: "清除筛选", run: () => { statusFilter = "all"; taskPage = 1; $("task-search").value = ""; for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all"; updateFilterTabs(); renderTasks(); } }) : emptyState("还没有学习任务", "平台首次成功同步后，作业、考试与视频截止信息会集中出现在这里。", { label: "查看平台接入状态 →", run: () => changeView("accounts") }));
+      const scoped = DueRadarTasks.scopeTasks(tasks, { scope });
+      const hiddenHistory = DueRadarTasks.scopeTasks(tasks, { scope: "all" }).length > DueRadarTasks.scopeTasks(tasks, { scope: "current" }).length;
+      if (scope === "current" && hiddenHistory) {
+        $("task-list").append(emptyState("本学期暂无任务", "上学期的课程与课程视频已默认收起，可以展开查看。", { label: "查看历史学期", run: () => { $("scope-filter").value = "all"; taskPage = 1; render(); } }));
+      } else if (scoped.length) {
+        $("task-list").append(emptyState("没有符合筛选条件的任务", "试着切换任务状态、平台、类型或截止时间。", { label: "清除筛选", run: () => { statusFilter = "all"; taskPage = 1; $("task-search").value = ""; for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all"; $("scope-filter").value = "current"; render(); } }));
+      } else {
+        $("task-list").append(emptyState("还没有学习任务", "平台首次成功同步后，作业、考试与视频截止信息会集中出现在这里。", { label: "查看平台接入状态 →", run: () => changeView("accounts") }));
+      }
       return;
     }
     const fragment = document.createDocumentFragment();
@@ -162,7 +171,7 @@
     }
     $("task-list").append(fragment);
   }
-  function updateFilterTabs() { document.querySelectorAll("[data-status]").forEach((button) => { const active = button.dataset.status === statusFilter; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); const status = button.dataset.status; const count = (state?.tasks || []).filter(task => status === "all" || task.status === status).length; button.textContent = `${status === "all" ? "全部" : taskStatus[status][0]} ${count}`; }); }
+  function updateFilterTabs() { const scoped = DueRadarTasks.scopeTasks(state?.tasks || [], { scope: $("scope-filter").value }); document.querySelectorAll("[data-status]").forEach((button) => { const active = button.dataset.status === statusFilter; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); const status = button.dataset.status; const count = scoped.filter(task => status === "all" || task.status === status).length; button.textContent = `${status === "all" ? "全部" : taskStatus[status][0]} ${count}`; }); }
   function renderPlatforms() {
     $("platform-list").replaceChildren();
     if (!state.platforms.length) { $("platform-list").append(emptyState("暂无平台信息", "服务尚未返回平台状态，请稍后刷新运行状态。")); return; }
@@ -306,7 +315,7 @@
     $("timezone").value = settings.timezone || "Asia/Shanghai";
   }
   function render() {
-    const tasks = state.tasks;
+    const tasks = DueRadarTasks.scopeTasks(state.tasks, { scope: $("scope-filter").value });
     const pending = tasks.filter((task) => task.status === "pending");
     $("stat-pending").textContent = pending.length;
     const overdue = pending.filter(task => DueRadarTasks.timeGroup(task, Date.now()) === "overdue").length;
@@ -321,7 +330,7 @@
     $("stat-sync").textContent = recent ? `最近同步 ${formatDate(recent, true)}` : "等待首次成功同步";
     const selectedPlatform = $("platform-filter").value;
     $("platform-filter").replaceChildren(new Option("全部平台", "all"));
-    const ids = new Set([...state.platforms.map((platform) => platform.id), ...tasks.map((task) => task.platform)].filter(Boolean));
+    const ids = new Set([...state.platforms.map((platform) => platform.id), ...state.tasks.map((task) => task.platform)].filter(Boolean));
     for (const id of ids) $("platform-filter").append(new Option(platformName(id), id));
     if (ids.has(selectedPlatform)) $("platform-filter").value = selectedPlatform;
     $("demo-banner").hidden = !state.demo;
@@ -401,7 +410,7 @@
   window.addEventListener("hashchange", () => changeView(location.hash.slice(1), false));
   document.querySelectorAll("[data-status]").forEach((button) => button.addEventListener("click", () => { statusFilter = button.dataset.status; taskPage = 1; updateFilterTabs(); renderTasks(); }));
   $("task-search").addEventListener("input", () => { taskPage = 1; renderTasks(); });
-  for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).addEventListener("change", () => { taskPage = 1; renderTasks(); });
+  for (const id of ["platform-filter", "kind-filter", "deadline-filter", "scope-filter"]) $(id).addEventListener("change", () => { taskPage = 1; render(); });
   $("task-prev").addEventListener("click", () => { taskPage--; renderTasks(); $("task-heading").scrollIntoView({ block: "start" }); });
   $("task-next").addEventListener("click", () => { taskPage++; renderTasks(); $("task-heading").scrollIntoView({ block: "start" }); });
   $("settings-form").addEventListener("input", () => { settingsDirty = true; });

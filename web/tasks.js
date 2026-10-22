@@ -10,6 +10,47 @@
     const date = value ? Date.parse(value) : NaN;
     return Number.isFinite(date) ? date : null;
   }
+  // Academic year starts in September; February through August still belong to
+  // the spring term until the new academic year begins.
+  function semester(now) {
+    const date = new Date(now);
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    if (month === 0) return { start: new Date(year - 1, 8, 1).getTime(), key: (year - 1) * 2 };
+    if (month >= 8) return { start: new Date(year, 8, 1).getTime(), key: year * 2 };
+    return { start: new Date(year, 1, 15).getTime(), key: (year - 1) * 2 + 1 };
+  }
+  const termPattern = /(20\d{2})\s*-\s*(20\d{2})\s*-\s*([12])/;
+  function courseKey(task) {
+    return `${task.platform || ""}\u0000${task.course || `#${task.id || ""}`}`;
+  }
+  // A course belongs to an earlier semester when every dated task is before this
+  // term, or, for courses without deadlines (videos), when its name carries an
+  // older academic term. Undated, unlabelled courses stay visible.
+  function scopeInfo(tasks, now = Date.now()) {
+    const current = semester(now);
+    const groups = new Map();
+    for (const task of tasks) {
+      const key = courseKey(task);
+      let group = groups.get(key);
+      if (!group) groups.set(key, group = { course: task.course || "", dates: [], historical: false });
+      const due = deadline(task);
+      if (due !== null) group.dates.push(due);
+    }
+    for (const group of groups.values()) {
+      if (group.dates.some((value) => value >= current.start)) continue;
+      const named = termPattern.exec(group.course);
+      const namedKey = named ? Number(named[1]) * 2 + (Number(named[3]) - 1) : null;
+      group.historical = group.dates.length > 0 || (namedKey !== null && namedKey < current.key);
+    }
+    return { start: current.start, key: current.key, groups };
+  }
+  function scopeTasks(tasks, options = {}) {
+    const { scope = "current", now = Date.now() } = options;
+    if (scope === "all") return tasks.slice();
+    const info = scopeInfo(tasks, now);
+    return tasks.filter((task) => !info.groups.get(courseKey(task)).historical);
+  }
   function timeGroup(task, now) {
     const due = deadline(task);
     return due === null ? "no_due" : due <= now ? "overdue" : "upcoming";
@@ -21,9 +62,9 @@
     return group === "upcoming" ? 0 : group === "no_due" ? 1 : 3;
   }
   function select(tasks, options = {}) {
-    const { status = "all", platform = "all", kind = "all", timing = "all", query = "", now = Date.now(), platformLabel = (id) => id } = options;
+    const { status = "all", platform = "all", kind = "all", timing = "all", query = "", scope = "current", now = Date.now(), platformLabel = (id) => id } = options;
     const search = query.trim().toLocaleLowerCase();
-    return tasks.filter((task) =>
+    return scopeTasks(tasks, { scope, now }).filter((task) =>
       (status === "all" || task.status === status) &&
       (platform === "all" || task.platform === platform) &&
       (kind === "all" || task.kind === kind) &&
@@ -53,5 +94,5 @@
       return url.protocol === "https:" && !url.username && !url.password ? url.href : null;
     } catch { return null; }
   }
-  return { deadline, timeGroup, select, paginate, safeSource };
+  return { deadline, timeGroup, select, paginate, safeSource, semester, scopeInfo, scopeTasks };
 });
