@@ -3,35 +3,452 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#153f39">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#17271f">
   <meta name="description" content="DueRadar，自行部署的学习任务与截止提醒。">
   <title>DueRadar</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2317271f'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23cfe0b8' stroke-width='1.4'/%3E%3Ccircle cx='16' cy='16' r='4' fill='none' stroke='%23cfe0b8' stroke-width='1.2' opacity='.55'/%3E%3Cpath d='M16 16 23.5 10.5' stroke='%23cfe0b8' stroke-width='1.4'/%3E%3Ccircle cx='21.5' cy='12' r='1.3' fill='%23cfe0b8'/%3E%3C/svg%3E">
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
-  <script src="/tasks.js" defer></script><script src="/app.js" defer></script>
+  <script src="/tasks.js" defer></script>
+  <script src="/app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳转至主要内容</a>
-  <div id="boot" class="boot" role="status"><span class="radar-logo" aria-hidden="true"></span><p>正在连接 DueRadar…</p></div>
-  <section id="login-screen" class="login-screen" hidden>
-    <div class="login-story"><div class="brand"><span class="radar-logo" aria-hidden="true"></span><span>DueRadar</span></div><div><h1>学习任务与截止提醒</h1><p>雨课堂、知到任务集中显示，通过 Bark 通知。</p></div></div>
-    <div class="login-side"><form id="login-form" class="login-form"><h2>登录</h2><label for="login-password">管理密码</label><input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="输入管理密码"><p id="login-error" class="form-error" role="alert"></p><button class="button primary full" type="submit">登录</button></form></div>
+
+  <div id="boot" class="boot" role="status">
+    <span class="radar-mark radar-mark--lg" aria-hidden="true"></span>
+    <p>正在连接 DueRadar</p>
+    <span class="boot__rule" aria-hidden="true"></span>
+  </div>
+
+  <section id="login-screen" class="login" hidden>
+    <div class="login__story">
+      <div class="login__brand">
+        <span class="radar-mark" aria-hidden="true"></span>
+        <span class="wordmark">DueRadar</span>
+      </div>
+      <div class="login__pitch">
+        <p class="eyebrow eyebrow--light">学习截止雷达 · 自行部署</p>
+        <h1>把每一个截止，<br>放在视线之内。</h1>
+        <p class="login__lede">雨课堂与知到的作业、考试、视频任务汇入同一条时间线，再通过 Bark 推送到 iPhone。</p>
+        <ul class="login__points">
+          <li><span class="login__index">01</span>两个平台，一条时间线</li>
+          <li><span class="login__index">02</span>考前与截止前分级提醒</li>
+          <li><span class="login__index">03</span>静默时段自动延后</li>
+        </ul>
+      </div>
+      <div class="scope" aria-hidden="true">
+        <span class="scope__ring scope__ring--1"></span>
+        <span class="scope__ring scope__ring--2"></span>
+        <span class="scope__ring scope__ring--3"></span>
+        <span class="scope__axis scope__axis--x"></span>
+        <span class="scope__axis scope__axis--y"></span>
+        <span class="scope__sweep"></span>
+        <span class="scope__blip scope__blip--1"></span>
+        <span class="scope__blip scope__blip--2"></span>
+        <span class="scope__blip scope__blip--3"></span>
+        <span class="scope__readout">SCAN · 15 MIN</span>
+      </div>
+    </div>
+    <div class="login__panel">
+      <button class="theme-toggle theme-toggle--login" type="button" data-theme-toggle aria-label="切换主题" title="切换主题" aria-pressed="false">
+        <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.4A8.6 8.6 0 1 1 9.6 4a6.9 6.9 0 0 0 10.4 10.4Z"/></svg>
+        <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+      <form id="login-form" class="login-form">
+        <p class="eyebrow">管理入口</p>
+        <h2>登录</h2>
+        <p class="login-form__hint">输入部署时设置的管理密码，进入这台设备上的任务雷达。</p>
+        <label for="login-password">管理密码</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="输入管理密码">
+        <p id="login-error" class="form-error" role="alert"></p>
+        <button class="button primary full" type="submit">进入任务总览 <span aria-hidden="true">→</span></button>
+        <p class="login-form__note">会话只保存在本机 · 数据不离开你的设备</p>
+      </form>
+    </div>
   </section>
+
   <div id="app" class="app-shell" hidden>
-    <aside class="sidebar"><a class="brand" href="#tasks"><span class="radar-logo" aria-hidden="true"></span><span>DueRadar</span></a><nav aria-label="主要导航"><button type="button" class="nav-link active" data-view="tasks" aria-current="page"><span aria-hidden="true">▦</span>任务总览<span id="nav-count" class="nav-count">0</span></button><button type="button" class="nav-link" data-view="accounts"><span aria-hidden="true">◎</span>平台账号</button><button type="button" class="nav-link" data-view="settings"><span aria-hidden="true">♧</span>通知设置</button><button type="button" class="nav-link" data-view="activity"><span aria-hidden="true">≋</span>运行记录</button></nav><div class="sidebar-bottom"><div class="service-indicator"><span id="service-dot" class="status-dot"></span><span id="service-label">正在连接服务</span></div><button id="logout" class="logout" type="button">退出登录 <span aria-hidden="true">↗</span></button></div></aside>
-    <main id="main" tabindex="-1"><header class="topbar"><div><span id="breadcrumb-view" class="breadcrumb">任务总览</span><p id="today" class="today"></p></div></header>
-      <div class="main-content"><div id="connection-error" class="banner error-banner" role="alert" hidden></div><div id="demo-banner" class="banner demo-banner" hidden><strong>演示数据</strong><span>当前实例以演示模式启动，示例任务不代表真实平台采集结果。</span></div>
-      <section id="view-tasks" class="view"><div class="page-heading"><div><h1>任务总览</h1></div><button id="sync" class="button primary" type="button"><span aria-hidden="true">↻</span>立即同步</button></div>
-        <div class="stats-grid"><article class="stat-card"><div class="stat-label">待完成任务<span class="stat-symbol" aria-hidden="true">▦</span></div><div class="stat-value" id="stat-pending">0</div><p id="pending-detail">正在关注的学习事项</p></article><article class="stat-card urgent-stat"><div class="stat-label">24 小时内截止<span class="stat-symbol" aria-hidden="true">◷</span></div><div class="stat-value" id="stat-soon">0</div></article><article class="stat-card"><div class="stat-label">已完成<span class="stat-symbol" aria-hidden="true">✓</span></div><div class="stat-value" id="stat-completed">0</div></article><article class="stat-card"><div class="stat-label">已登录平台<span class="stat-symbol" aria-hidden="true">◎</span></div><div class="stat-value"><span id="stat-platforms">0</span><span class="stat-denominator" id="stat-platform-total"> / 3</span></div><p id="stat-sync">等待首次成功同步</p></article></div>
-        <div class="workspace-grid"><section class="panel task-panel" aria-labelledby="task-heading"><div class="panel-heading"><div><h2 id="task-heading">任务清单 <span id="task-count" class="count-label">0</span></h2></div><span class="subtle-label">每 15 分钟同步</span></div><div class="task-toolbar"><div class="filter-tabs" aria-label="任务状态筛选"><button type="button" class="filter-tab active" data-status="all" aria-pressed="true">全部</button><button type="button" class="filter-tab" data-status="pending" aria-pressed="false">待完成</button><button type="button" class="filter-tab" data-status="completed" aria-pressed="false">已完成</button><button type="button" class="filter-tab" data-status="unknown" aria-pressed="false">状态未知</button></div><div class="search-controls"><label class="sr-only" for="task-search">搜索任务或课程</label><input id="task-search" type="search" placeholder="搜索任务或课程"><label class="sr-only" for="platform-filter">筛选平台</label><select id="platform-filter"><option value="all">全部平台</option></select><label class="sr-only" for="kind-filter">筛选任务类型</label><select id="kind-filter"><option value="all">全部类型</option><option value="homework">作业</option><option value="exam">考试</option><option value="chapter">章节测试</option><option value="video">视频学习</option></select><label class="sr-only" for="deadline-filter">筛选截止时间</label><select id="deadline-filter"><option value="all">全部时间</option><option value="upcoming">尚未截止</option><option value="overdue">已过截止</option><option value="no_due">截止未知</option></select><label class="sr-only" for="scope-filter">筛选学期</label><select id="scope-filter"><option value="current">本学期</option><option value="all">全部学期</option></select></div></div><div id="task-list" class="task-list" aria-live="polite"></div><nav id="task-pagination" class="task-pagination" aria-label="任务分页" hidden><span id="task-page-label" role="status"></span><div><button id="task-prev" class="button secondary" type="button">上一页</button><button id="task-next" class="button secondary" type="button">下一页</button></div></nav></section>
-        <aside class="overview-side"><section class="panel upcoming-panel"><div class="panel-heading"><h2>接下来的提醒</h2><span class="tiny-icon" aria-hidden="true">↗</span></div><div id="upcoming-list"></div><button type="button" class="text-button" data-view="activity">查看全部记录 <span aria-hidden="true">→</span></button></section><section class="quiet-card"><span class="quiet-symbol" aria-hidden="true">☾</span><h2 id="quiet-title">静默时段</h2><p id="quiet-summary">正在读取静默设置</p><div class="quiet-rule">考前 1 小时、截止前 30 分钟和课上答题照常发送。</div><button type="button" class="text-button" data-view="settings">调整通知规则 <span aria-hidden="true">→</span></button></section></aside></div>
-      </section>
-      <section id="view-accounts" class="view" hidden><div class="page-heading"><div><h1>平台账号</h1></div></div><div class="banner info-banner"><span>雨课堂用微信扫码，知到用 APP 扫码。</span></div><div id="platform-list" class="platform-grid"></div></section>
-      <section id="view-settings" class="view" hidden><div class="page-heading"><div><h1>通知设置</h1></div></div><div class="settings-grid"><section class="panel settings-panel"><div class="panel-heading"><div><h2>Bark 通知</h2></div><span id="bark-status" class="badge neutral">未配置</span></div><form id="bark-form"><label for="bark-server">服务地址</label><input id="bark-server" type="url" required placeholder="https://api.day.app" autocomplete="off"><label for="bark-key">设备密钥</label><input id="bark-key" type="password" autocomplete="new-password" placeholder="输入 Bark 设备密钥"><p class="field-hint">已配置时留空则保留原密钥。</p><div class="form-actions"><button class="button primary" type="submit">保存 Bark 配置</button><button id="bark-test" class="button secondary" type="button">发送测试通知</button></div></form></section><section class="panel settings-panel"><div class="panel-heading"><div><h2>全局提醒规则</h2><p>用逗号分隔分钟数，留空则关闭该类提醒。</p></div></div><form id="settings-form"><label for="deadline-minutes">作业、章节测试与考试截止</label><input id="deadline-minutes" type="text" inputmode="numeric" placeholder="1440, 180, 30" aria-describedby="deadline-hint"><label for="exam-minutes">考试开始</label><input id="exam-minutes" type="text" inputmode="numeric" placeholder="1440, 60"><label for="video-minutes">视频学习截止</label><input id="video-minutes" type="text" inputmode="numeric" placeholder="4320, 1440, 180"><div class="form-divider"></div><label class="switch-label" for="quiet-enabled"><span><strong>静默时段</strong><small>普通提醒延后发送。</small></span><input id="quiet-enabled" type="checkbox" role="switch"></label><div class="time-grid"><div><label for="quiet-start">开始时间</label><input id="quiet-start" type="time" required></div><div><label for="quiet-end">结束时间</label><input id="quiet-end" type="time" required></div></div><label for="timezone">提醒时区</label><input id="timezone" type="text" required placeholder="Asia/Shanghai"><div class="form-divider"></div><label class="switch-label" for="in-class-enabled"><span><strong>课上答题提醒</strong><small>出现新的随堂答题时立即提醒。</small></span><input id="in-class-enabled" type="checkbox" role="switch"></label><label for="in-class-poll">检查间隔（秒）</label><input id="in-class-poll" type="number" min="10" max="300" step="5" inputmode="numeric" aria-describedby="in-class-hint"><p class="field-hint" id="in-class-hint">10—300 秒，仅在上课期间检查。</p><div class="form-actions"><button id="in-class-test" class="button secondary" type="button">发送课上答题测试</button></div><div class="form-actions"><button class="button primary" type="submit">保存提醒规则</button><button id="settings-defaults" class="button secondary" type="button">填入默认值</button></div></form></section></div></section>
-      <section id="view-activity" class="view" hidden><div class="page-heading"><div><h1>运行记录</h1></div><button id="refresh" class="button secondary" type="button">刷新状态</button></div><div id="runtime-grid" class="runtime-grid"></div><section class="panel"><div class="panel-heading"><div><h2>通知事件</h2></div><span id="event-count" class="count-label">0</span></div><div class="table-scroll"><table><thead><tr><th scope="col">任务 / 事件</th><th scope="col">计划时间</th><th scope="col">状态</th><th scope="col">尝试次数</th><th scope="col">最近错误</th></tr></thead><tbody id="event-list"></tbody></table></div><div id="events-empty" class="empty-state" hidden><span class="empty-icon" aria-hidden="true">≋</span><h3>暂无记录</h3></div></section></section>
-      <footer class="page-footer"><span>DueRadar <span id="version"></span></span></footer></div>
+    <aside class="rail">
+      <div class="rail__top">
+        <a class="brand" href="#tasks">
+          <span class="radar-mark" aria-hidden="true"></span>
+          <span class="brand__text"><strong class="wordmark">DueRadar</strong><small>截止雷达</small></span>
+        </a>
+        <div class="rail__actions">
+          <button class="theme-toggle" type="button" data-theme-toggle aria-label="切换主题" title="切换主题" aria-pressed="false">
+            <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.4A8.6 8.6 0 1 1 9.6 4a6.9 6.9 0 0 0 10.4 10.4Z"/></svg>
+            <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+          </button>
+          <button id="logout" class="logout" type="button" title="退出登录" aria-label="退出登录">
+            <span>退出</span>
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h10"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <nav class="rail__nav" aria-label="主要导航">
+        <button type="button" class="nav-link active" data-view="tasks" aria-current="page">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+          <span>任务总览</span>
+          <span id="nav-count" class="nav-count">0</span>
+        </button>
+        <button type="button" class="nav-link" data-view="accounts">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.4"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>
+          <span>平台账号</span>
+        </button>
+        <button type="button" class="nav-link" data-view="settings">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h8M16 7h4M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/></svg>
+          <span>通知设置</span>
+        </button>
+        <button type="button" class="nav-link" data-view="activity">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2.2-6 3.6 12 2.2-6H21"/></svg>
+          <span>运行记录</span>
+        </button>
+      </nav>
+
+      <div class="rail__foot">
+        <div class="service-indicator">
+          <span id="service-dot" class="status-dot"></span>
+          <span id="service-label">正在连接服务</span>
+        </div>
+        <p class="rail__note">每 15 分钟同步一次<br>Bark 推送到 iPhone</p>
+      </div>
+    </aside>
+
+    <main id="main" tabindex="-1">
+      <header class="topbar">
+        <div class="topbar__inner">
+          <div class="topbar__date">
+            <span id="breadcrumb-view" class="sr-only">任务总览</span>
+            <p id="today" class="today"></p>
+          </div>
+          <p class="topbar__cadence"><span class="pulse" aria-hidden="true"></span>每 15 分钟自动同步</p>
+        </div>
+      </header>
+
+      <div class="main-content">
+        <div id="connection-error" class="banner error-banner" role="alert" hidden></div>
+        <div id="demo-banner" class="banner demo-banner" hidden>
+          <strong>演示数据</strong>
+          <span>当前实例以演示模式启动，示例任务不代表真实平台采集结果。</span>
+        </div>
+
+        <section id="view-tasks" class="view">
+          <header class="page-head">
+            <div class="page-head__text">
+              <p class="eyebrow">本学期 · 时间线</p>
+              <h1>任务总览</h1>
+              <p class="page-head__lede">默认只看本学期；上学期课程可在筛选中展开，且不再参与提醒。</p>
+            </div>
+            <div class="page-head__actions">
+              <button id="sync" class="button primary" type="button">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.4 5.7"/><path d="M20 4v7h-7"/></svg>
+                立即同步
+              </button>
+            </div>
+          </header>
+
+          <section class="horizon" aria-label="任务概况">
+            <div class="horizon__count">
+              <p class="horizon__label">待完成</p>
+              <p class="horizon__number"><strong id="stat-pending">0</strong><span>项</span></p>
+              <p id="pending-detail" class="horizon__detail">正在关注的学习事项</p>
+            </div>
+            <div class="horizon__next" id="next-block">
+              <p class="horizon__label">下一道截止</p>
+              <p class="horizon__next-title" id="next-title">读取中</p>
+              <p class="horizon__next-meta"><span class="mono" id="next-when">—</span><span class="horizon__countdown" id="next-countdown">—</span></p>
+            </div>
+            <dl class="horizon__stats">
+              <div class="horizon__stat horizon__stat--alert"><dt>24 小时内</dt><dd id="stat-soon">0</dd></div>
+              <div class="horizon__stat"><dt>已完成</dt><dd id="stat-completed">0</dd></div>
+              <div class="horizon__stat"><dt>平台在线</dt><dd><span id="stat-platforms">0</span><span class="horizon__denom" id="stat-platform-total"> / 3</span></dd></div>
+              <div class="horizon__sync"><dt>最近同步</dt><dd id="stat-sync">等待首次成功同步</dd></div>
+            </dl>
+          </section>
+
+          <div class="workspace-grid">
+            <section class="panel task-panel" aria-labelledby="task-heading">
+              <div class="panel-heading">
+                <div class="panel-heading__title">
+                  <h2 id="task-heading">任务清单</h2>
+                  <p><span id="task-count" class="count-label">0</span> 项 · 按截止时间排序</p>
+                </div>
+                <span class="subtle-label">每 15 分钟同步</span>
+              </div>
+              <div id="task-toolbar" class="task-toolbar">
+                <div class="filter-tabs" role="group" aria-label="任务状态筛选">
+                  <button type="button" class="filter-tab active" data-status="all" aria-pressed="true">全部</button>
+                  <button type="button" class="filter-tab" data-status="pending" aria-pressed="false">待完成</button>
+                  <button type="button" class="filter-tab" data-status="completed" aria-pressed="false">已完成</button>
+                  <button type="button" class="filter-tab" data-status="unknown" aria-pressed="false">状态未知</button>
+                </div>
+                <button id="filter-toggle" class="filter-toggle" type="button" aria-expanded="false" aria-controls="task-filters" aria-label="展开筛选">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h8M16 7h4M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/></svg>
+                  <span>筛选</span>
+                  <span id="filter-count" class="filter-toggle__count" hidden>0</span>
+                  <svg class="icon filter-toggle__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <div id="task-filters" class="filter-panel">
+                <div class="search-field">
+                  <svg class="icon search-field__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+                  <label class="sr-only" for="task-search">搜索任务或课程</label>
+                  <input id="task-search" type="search" placeholder="搜索任务或课程">
+                </div>
+                <div class="filter-selects">
+                  <label class="sr-only" for="platform-filter">筛选平台</label>
+                  <select id="platform-filter">
+                    <option value="all">全部平台</option>
+                  </select>
+                  <label class="sr-only" for="kind-filter">筛选任务类型</label>
+                  <select id="kind-filter">
+                    <option value="all">全部类型</option>
+                    <option value="homework">作业</option>
+                    <option value="exam">考试</option>
+                    <option value="chapter">章节测试</option>
+                    <option value="video">视频学习</option>
+                  </select>
+                  <label class="sr-only" for="deadline-filter">筛选截止时间</label>
+                  <select id="deadline-filter">
+                    <option value="all">全部时间</option>
+                    <option value="upcoming">尚未截止</option>
+                    <option value="overdue">已过截止</option>
+                    <option value="no_due">截止未知</option>
+                  </select>
+                  <label class="sr-only" for="scope-filter">筛选学期</label>
+                  <select id="scope-filter">
+                    <option value="current">本学期</option>
+                    <option value="all">全部学期</option>
+                  </select>
+                </div>
+                </div>
+              </div>
+              <div id="task-list" class="task-list" aria-live="polite"></div>
+              <nav id="task-pagination" class="task-pagination" aria-label="任务分页" hidden>
+                <span id="task-page-label" role="status"></span>
+                <div>
+                  <button id="task-prev" class="button secondary" type="button">上一页</button>
+                  <button id="task-next" class="button secondary" type="button">下一页</button>
+                </div>
+              </nav>
+            </section>
+
+            <aside class="overview-side">
+              <section class="panel upcoming-panel" aria-labelledby="upcoming-heading">
+                <div class="panel-heading">
+                  <h2 id="upcoming-heading">接下来的提醒</h2>
+                  <span class="subtle-label">待发送</span>
+                </div>
+                <div id="upcoming-list" class="upcoming-list"></div>
+                <button type="button" class="text-button" data-view="activity">全部运行记录 <span aria-hidden="true">→</span></button>
+              </section>
+
+              <section class="quiet-card">
+                <div class="quiet-card__top">
+                  <span class="quiet-card__icon" aria-hidden="true">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.4A8.6 8.6 0 1 1 9.6 4a6.9 6.9 0 0 0 10.4 10.4Z"/></svg>
+                  </span>
+                  <span class="quiet-card__label">Quiet hours</span>
+                </div>
+                <h2 id="quiet-title">正在读取静默设置</h2>
+                <p id="quiet-summary">正在读取静默设置</p>
+                <p class="quiet-rule">考前 1 小时、截止前 30 分钟与课上答题照常发送。</p>
+                <button type="button" class="text-button text-button--light" data-view="settings">调整通知规则 <span aria-hidden="true">→</span></button>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section id="view-accounts" class="view" hidden>
+          <header class="page-head">
+            <div class="page-head__text">
+              <p class="eyebrow">接入 · 扫码</p>
+              <h1>平台账号</h1>
+              <p class="page-head__lede">扫码一次，之后由设备独立同步；账号密码不经过本服务。</p>
+            </div>
+          </header>
+          <div class="banner info-banner">
+            <span>雨课堂使用微信扫码，知到使用 APP 扫码。会话加密保存在本机数据目录。</span>
+          </div>
+          <div id="platform-list" class="platform-grid"></div>
+        </section>
+
+        <section id="view-settings" class="view" hidden>
+          <header class="page-head">
+            <div class="page-head__text">
+              <p class="eyebrow">通知 · 节奏</p>
+              <h1>通知设置</h1>
+              <p class="page-head__lede">Bark 推送通道与提醒节点；保存后立即生效。</p>
+            </div>
+          </header>
+
+          <div class="settings-grid">
+            <section class="panel settings-panel settings-panel--bark">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-index">01 / 推送通道</p>
+                  <h2>Bark 通知</h2>
+                  <p>发送到 iPhone 的通道，密钥加密保存在数据目录。</p>
+                </div>
+                <span id="bark-status" class="badge neutral">未配置</span>
+              </div>
+              <form id="bark-form">
+                <label for="bark-server">服务地址</label>
+                <input id="bark-server" type="url" required placeholder="https://api.day.app" autocomplete="off">
+                <label for="bark-key">设备密钥</label>
+                <input id="bark-key" type="password" autocomplete="new-password" placeholder="输入 Bark 设备密钥">
+                <p class="field-hint">已配置时留空则保留原密钥；更换服务地址需重新填写。</p>
+                <div class="form-actions">
+                  <button class="button primary" type="submit">保存配置</button>
+                  <button id="bark-test" class="button secondary" type="button">发送测试通知</button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel settings-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-index">02 / 提醒节奏</p>
+                  <h2>全局提醒规则</h2>
+                  <p>用逗号分隔分钟数，留空则关闭该类提醒。</p>
+                </div>
+              </div>
+              <form id="settings-form">
+                <div class="field-group">
+                  <p class="field-group__title">提醒节点</p>
+                  <label for="deadline-minutes">作业、章节测试与考试截止</label>
+                  <input id="deadline-minutes" type="text" inputmode="numeric" placeholder="1440, 180, 30">
+                  <label for="exam-minutes">考试开始</label>
+                  <input id="exam-minutes" type="text" inputmode="numeric" placeholder="1440, 60">
+                  <label for="video-minutes">视频学习截止</label>
+                  <input id="video-minutes" type="text" inputmode="numeric" placeholder="4320, 1440, 180">
+                </div>
+
+                <div class="field-group">
+                  <p class="field-group__title">静默与例外</p>
+                  <label class="switch-label" for="quiet-enabled">
+                    <span><strong>静默时段</strong><small>普通提醒延后发送。</small></span>
+                    <input id="quiet-enabled" type="checkbox" role="switch">
+                  </label>
+                  <div class="time-grid">
+                    <div>
+                      <label for="quiet-start">开始时间</label>
+                      <input id="quiet-start" type="time" required>
+                    </div>
+                    <div>
+                      <label for="quiet-end">结束时间</label>
+                      <input id="quiet-end" type="time" required>
+                    </div>
+                  </div>
+                  <label for="timezone">提醒时区</label>
+                  <input id="timezone" type="text" required placeholder="Asia/Shanghai">
+                </div>
+
+                <div class="field-group">
+                  <p class="field-group__title">课上答题</p>
+                  <label class="switch-label" for="in-class-enabled">
+                    <span><strong>课上答题提醒</strong><small>出现新的随堂答题时立即提醒。</small></span>
+                    <input id="in-class-enabled" type="checkbox" role="switch">
+                  </label>
+                  <label for="in-class-poll">检查间隔（秒）</label>
+                  <input id="in-class-poll" type="number" min="10" max="300" step="5" inputmode="numeric" aria-describedby="in-class-hint">
+                  <p class="field-hint" id="in-class-hint">10—300 秒，仅在上课期间检查。</p>
+                  <div class="form-actions">
+                    <button id="in-class-test" class="button secondary" type="button">发送课上答题测试</button>
+                  </div>
+                </div>
+
+                <div class="form-actions form-actions--end">
+                  <button class="button primary" type="submit">保存提醒规则</button>
+                  <button id="settings-defaults" class="button secondary" type="button">填入默认值</button>
+                </div>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-activity" class="view" hidden>
+          <header class="page-head">
+            <div class="page-head__text">
+              <p class="eyebrow">诊断 · 记录</p>
+              <h1>运行记录</h1>
+              <p class="page-head__lede">服务运行状态，以及每一条通知的去向。</p>
+            </div>
+            <div class="page-head__actions">
+              <button id="refresh" class="button secondary" type="button">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 1 2.4 5.7"/><path d="M4 20v-7h7"/></svg>
+                刷新状态
+              </button>
+            </div>
+          </header>
+
+          <div id="runtime-grid" class="runtime-grid"></div>
+
+          <section class="panel events-panel">
+            <div class="panel-heading">
+              <div class="panel-heading__title">
+                <h2>通知事件</h2>
+                <p>按计划时间倒序 · 保留发送历史</p>
+              </div>
+              <span id="event-count" class="count-label">0</span>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">任务 / 事件</th>
+                    <th scope="col">计划时间</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">尝试次数</th>
+                    <th scope="col">最近错误</th>
+                  </tr>
+                </thead>
+                <tbody id="event-list"></tbody>
+              </table>
+            </div>
+            <div id="events-empty" class="empty-state" hidden>
+              <span class="empty-icon" aria-hidden="true">≋</span>
+              <h3>暂无记录</h3>
+              <p>任务同步后，已安排的提醒会出现在这里。</p>
+            </div>
+          </section>
+        </section>
+
+        <footer class="page-footer">
+          <span>DueRadar <span id="version"></span></span>
+          <span>自行部署 · 数据留在本机</span>
+        </footer>
+      </div>
     </main>
   </div>
-  <dialog id="rain-dialog" class="login-dialog" aria-labelledby="rain-title"><h2 id="rain-title">绑定普通雨课堂</h2><p id="rain-description">通过平台官方二维码确认登录</p><img id="rain-qr" alt="雨课堂登录二维码" width="300" height="300"><div id="rain-assist" class="assist-panel" hidden><p>在电脑的 DueRadar 项目目录启动辅助程序，按提示填写下面的信息。</p><code>python scripts/rain_assist.py</code><label for="assist-instance">实例地址</label><input id="assist-instance" readonly autocomplete="off" spellcheck="false"><label for="assist-flow">流程编号</label><input id="assist-flow" readonly autocomplete="off" spellcheck="false"><label for="assist-code">一次性配对码</label><input id="assist-code" readonly autocomplete="off" spellcheck="false"><p id="assist-expires" class="field-hint"></p><p class="field-hint">账号密码只在雨课堂官方页面填写。首次使用请阅读<a class="task-source" href="https://github.com/ethandong16/due-radar/blob/main/docs/DESKTOP-LOGIN.md" target="_blank" rel="noopener noreferrer">电脑辅助登录说明 ↗</a>。</p></div><p id="rain-login-status" role="status"></p><button id="rain-close" class="button secondary" type="button">关闭</button></dialog>
+
+  <dialog id="rain-dialog" class="dialog" aria-labelledby="rain-title">
+    <div class="dialog__head">
+      <p class="eyebrow">平台绑定</p>
+      <h2 id="rain-title">绑定普通雨课堂</h2>
+      <p id="rain-description">通过平台官方二维码确认登录</p>
+    </div>
+    <div class="dialog__qr" id="rain-qr-frame">
+      <img id="rain-qr" alt="雨课堂登录二维码" width="300" height="300">
+    </div>
+    <div id="rain-assist" class="assist-panel" hidden>
+      <p>在电脑的 DueRadar 项目目录启动辅助程序，按提示填写下面的信息。</p>
+      <code>python scripts/rain_assist.py</code>
+      <label for="assist-instance">实例地址</label>
+      <input id="assist-instance" readonly autocomplete="off" spellcheck="false">
+      <label for="assist-flow">流程编号</label>
+      <input id="assist-flow" readonly autocomplete="off" spellcheck="false">
+      <label for="assist-code">一次性配对码</label>
+      <input id="assist-code" readonly autocomplete="off" spellcheck="false">
+      <p id="assist-expires" class="field-hint"></p>
+      <p class="field-hint">账号密码只在雨课堂官方页面填写。首次使用请阅读<a class="task-source" href="https://github.com/ethandong16/due-radar/blob/main/docs/DESKTOP-LOGIN.md" target="_blank" rel="noopener noreferrer">电脑辅助登录说明 ↗</a>。</p>
+    </div>
+    <p id="rain-login-status" class="dialog__status" role="status"></p>
+    <button id="rain-close" class="button secondary full" type="button">关闭</button>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

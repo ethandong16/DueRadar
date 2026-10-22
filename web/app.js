@@ -39,6 +39,51 @@
     try { return new Intl.DateTimeFormat("zh-CN", { timeZone: state?.settings?.timezone || "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, ...(short ? {} : { year: "numeric" }) }).format(date); }
     catch { return date.toLocaleString("zh-CN", { hour12: false }); }
   }
+  function dateParts(value) {
+    const date = timestamp(value);
+    if (!date) return { date: "—", time: "未知" };
+    const zone = state?.settings?.timezone || defaults.timezone;
+    try {
+      const day = new Intl.DateTimeFormat("zh-CN", { timeZone: zone, month: "2-digit", day: "2-digit" }).format(date);
+      const clock = new Intl.DateTimeFormat("zh-CN", { timeZone: zone, hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+      return { date: day.replace(/[/-]/g, "."), time: clock };
+    } catch { return { date: "—", time: "未知" }; }
+  }
+  function dayKey(date) {
+    const zone = state?.settings?.timezone || defaults.timezone;
+    try { return new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date); }
+    catch { return new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(date); }
+  }
+  function relativeLabel(date, verb = "截止") {
+    const diff = date.getTime() - Date.now();
+    if (diff <= 0) return `已过${verb}`;
+    const minutes = Math.ceil(diff / 60000);
+    if (minutes < 60) return `${minutes} 分钟后${verb}`;
+    if (minutes < 2880) return `${Math.ceil(minutes / 60)} 小时后${verb}`;
+    return `${Math.ceil(minutes / 1440)} 天后${verb}`;
+  }
+  function agendaGroup(task) {
+    if (task.status === "completed") return "已完成";
+    const due = timestamp(task.due_at);
+    if (!due) return "截止未知";
+    const now = Date.now();
+    if (due.getTime() <= now) return "已过截止";
+    const key = dayKey(due);
+    if (key === dayKey(new Date(now))) return "今天";
+    if (key === dayKey(new Date(now + 86400000))) return "明天";
+    if (due.getTime() - now <= 7 * 86400000) return "未来七天";
+    return "更远";
+  }
+  // Exams matter at their start, everything else at its deadline.
+  function nextMoment(task) {
+    const now = Date.now();
+    const start = task.kind === "exam" ? timestamp(task.start_at) : null;
+    const due = timestamp(task.due_at);
+    const moments = [];
+    if (start && start.getTime() > now) moments.push({ at: start, verb: "开始", label: "考试开始" });
+    if (due && due.getTime() > now) moments.push({ at: due, verb: "截止", label: task.kind === "video" ? "视频截止" : "截止" });
+    return moments.sort((a, b) => a.at - b.at)[0] || null;
+  }
   function platformName(id) { return state?.platforms?.find((platform) => platform.id === id)?.name || ({ rain: "普通雨课堂", yuketang: "普通雨课堂", zhidao_shared: "知到共享课", zhidao_campus: "知到校内课", zhihuishu_shared: "知到共享课", zhihuishu_campus: "知到校内课" })[id] || id || "未知平台"; }
   function cleanStatus(mapping, value) { return mapping[value] || [value || "未知", "neutral"]; }
   function notify(message, error = false) {
@@ -115,14 +160,26 @@
     const diff = date.getTime() - Date.now();
     if (diff <= 0) return { main: "已过截止时间", sub: formatDate(task.due_at, true), urgent: false };
     const minutes = Math.ceil(diff / 60000);
-    const label = minutes < 60 ? `${minutes} 分钟后截止` : minutes < 1440 ? `${Math.ceil(minutes / 60)} 小时后截止` : `${Math.ceil(minutes / 1440)} 天后截止`;
+    const label = minutes < 60 ? `${minutes} 分钟后截止` : minutes < 2880 ? `${Math.ceil(minutes / 60)} 小时后截止` : `${Math.ceil(minutes / 1440)} 天后截止`;
     return { main: label, sub: formatDate(task.due_at, true), urgent: diff <= 86400000 };
+  }
+  function updateFilterCount() {
+    const count = [
+      $("task-search").value.trim() !== "",
+      $("platform-filter").value && $("platform-filter").value !== "all",
+      $("kind-filter").value && $("kind-filter").value !== "all",
+      $("deadline-filter").value && $("deadline-filter").value !== "all",
+      $("scope-filter").value && $("scope-filter").value !== "current"
+    ].filter(Boolean).length;
+    $("filter-count").textContent = count;
+    $("filter-count").hidden = count === 0;
   }
   function renderTasks() {
     const tasks = state.tasks || [];
     const query = $("task-search").value.trim().toLocaleLowerCase();
     const platform = $("platform-filter").value;
     const scope = $("scope-filter").value;
+    updateFilterCount();
     const filtered = DueRadarTasks.select(tasks, { status: statusFilter, platform, query, kind: $("kind-filter").value, timing: $("deadline-filter").value, scope, platformLabel: platformName });
     const page = DueRadarTasks.paginate(filtered, taskPage);
     taskPage = page.page;
@@ -146,30 +203,55 @@
       return;
     }
     const fragment = document.createDocumentFragment();
-    for (const task of page.items) {
-      const card = node("article", "task-item");
-      const kind = Object.hasOwn(kindNames, task.kind) ? task.kind : "homework";
-      const icon = node("div", `task-kind-icon ${kind}`, { homework: "▤", exam: "◇", chapter: "▥", video: "▷" }[kind]); icon.setAttribute("aria-hidden", "true");
-      const main = node("div", "task-main");
-      const titleLine = node("div", "task-title-line");
-      titleLine.append(node("h3", "task-title", task.title || "未命名任务"), badge(...cleanStatus(taskStatus, task.status)));
-      const meta = node("div", "task-meta");
-      [platformName(task.platform), task.course || "课程未知", kindNames[task.kind] || "其他任务"].forEach((value, index) => { if (index) meta.append(node("span", "separator", "·")); meta.append(node("span", "", value)); });
-      main.append(titleLine, meta);
-      if (task.kind === "exam") main.append(node("p", "task-start", `开始：${formatDate(task.start_at, true)}`));
-      if (task.kind === "video") {
-        if (typeof task.progress === "number" && Number.isFinite(task.progress)) {
-          const progress = Math.max(0, Math.min(100, task.progress));
-          const track = node("progress", "progress-track"); track.max = 100; track.value = progress; track.setAttribute("aria-label", "视频学习进度");
-          main.append(track, node("p", "progress-label", `已学习 ${Math.round(progress)}%`));
-        } else main.append(node("p", "progress-label", "学习进度未知"));
+    const order = ["今天", "明天", "未来七天", "更远", "截止未知", "已过截止", "已完成"];
+    const groups = new Map(order.map((label) => [label, []]));
+    for (const task of page.items) groups.get(agendaGroup(task)).push(task);
+    for (const label of order) {
+      const items = groups.get(label);
+      if (!items.length) continue;
+      const group = node("section", "agenda-group");
+      group.setAttribute("aria-label", label);
+      const head = node("div", "agenda-head");
+      head.append(node("h3", "agenda-head__label", label), node("span", "agenda-head__rule"), node("span", "agenda-head__count", items.length));
+      group.append(head);
+      for (const task of items) {
+        const kind = Object.hasOwn(kindNames, task.kind) ? task.kind : "homework";
+        const due = timestamp(task.due_at);
+        const now = Date.now();
+        const isCompleted = task.status === "completed";
+        const isOverdue = !isCompleted && Boolean(due) && due.getTime() <= now;
+        const isUrgent = task.status === "pending" && Boolean(due) && due.getTime() > now && due.getTime() - now <= 86400000;
+        const card = node("article", `task-item${isUrgent ? " is-urgent" : ""}${isOverdue ? " is-overdue" : ""}${isCompleted ? " is-completed" : ""}`);
+        const parts = dateParts(task.due_at);
+        const when = node("div", "task-when");
+        when.append(node("span", "task-when__date", parts.date), node("span", "task-when__time", parts.time));
+        const main = node("div", "task-main");
+        const titleLine = node("div", "task-title-line");
+        titleLine.append(node("h3", "task-title", task.title || "未命名任务"), badge(...cleanStatus(taskStatus, task.status)));
+        const meta = node("div", "task-meta");
+        [platformName(task.platform), task.course || "课程未知", kindNames[task.kind] || "其他任务"].forEach((value, index) => { if (index) meta.append(node("span", "separator", "/")); meta.append(node("span", "", value)); });
+        main.append(titleLine, meta);
+        if (task.kind === "exam") main.append(node("p", "task-start", `开始：${formatDate(task.start_at, true)}`));
+        if (task.kind === "video") {
+          if (typeof task.progress === "number" && Number.isFinite(task.progress)) {
+            const progress = Math.max(0, Math.min(100, task.progress));
+            const track = node("progress", "progress-track"); track.max = 100; track.value = progress; track.setAttribute("aria-label", "视频学习进度");
+            main.append(track, node("p", "progress-label", `已学习 ${Math.round(progress)}%`));
+          } else main.append(node("p", "progress-label", "学习进度未知"));
+        }
+        const deadline = deadlineLabel(task);
+        const foot = node("div", "task-foot");
+        foot.append(node("span", `deadline-main${deadline.urgent && !isCompleted ? " urgent" : ""}`, isCompleted ? "平台已记录完成" : deadline.main));
+        const source = DueRadarTasks.safeSource(task.source_url);
+        if (source) { const link = node("a", "task-source", "打开课程平台 ↗"); link.href = source; link.target = "_blank"; link.rel = "noopener noreferrer"; foot.append(link); }
+        main.append(foot);
+        main.title = `最近观测：${formatDate(task.last_seen_at)}`;
+        const mark = node("span", `task-kind ${kind}`, { homework: "作", exam: "考", chapter: "章", video: "视" }[kind]);
+        mark.setAttribute("aria-hidden", "true");
+        card.append(when, main, mark);
+        group.append(card);
       }
-      main.title = `最近观测：${formatDate(task.last_seen_at)}`;
-      const source = DueRadarTasks.safeSource(task.source_url);
-      if (source) { const link = node("a", "task-source", "打开课程平台 ↗"); link.href = source; link.target = "_blank"; link.rel = "noopener noreferrer"; main.append(link); }
-      const deadline = deadlineLabel(task);
-      const time = node("div", "task-deadline"); time.append(node("div", `deadline-main${deadline.urgent ? " urgent" : ""}`, deadline.main), node("div", "deadline-sub", deadline.sub));
-      card.append(icon, main, time); fragment.append(card);
+      fragment.append(group);
     }
     $("task-list").append(fragment);
   }
@@ -179,7 +261,12 @@
     if (!state.platforms.length) { $("platform-list").append(emptyState("暂无平台信息", "")); return; }
     for (const platform of state.platforms) {
       const card = node("article", "platform-card");
-      card.append(node("div", "platform-avatar", (platform.name || "课").slice(0, 1)), node("h2", "", platform.name || platform.id));
+      const head = node("div", "platform-card__head");
+      const title = node("div", "platform-card__title");
+      const subtitle = platform.id === "rain" ? "微信扫码 · 可选用电脑辅助" : platform.id === "zhidao_campus" ? "知到 APP 扫码" : platform.id === "zhidao_shared" ? "共享课 · 待接入验证" : "平台接入";
+      title.append(node("h2", "", platform.name || platform.id), node("p", "platform-subtitle", subtitle));
+      head.append(node("div", "platform-avatar", (platform.name || "课").slice(0, 1)), title);
+      card.append(head);
       for (const [label, mapping, value] of [["账号状态", loginStatuses, platform.login_status], ["同步状态", syncStatuses, platform.sync_status]]) { const row = node("div", "platform-status"); row.append(node("span", "", label), badge(...cleanStatus(mapping, value))); card.append(row); }
       card.append(node("p", "platform-message", platform.message || "待验证"));
       card.append(node("p", "platform-date", `最近成功同步：${timestamp(platform.last_success) ? formatDate(platform.last_success) : "尚无成功记录"}`));
@@ -232,6 +319,7 @@
     $("rain-title").textContent = assist ? "电脑辅助登录普通雨课堂" : `绑定${label}`;
     $("rain-description").textContent = assist ? "在电脑上打开官方登录页，输入账号密码并完成平台验证。" : "通过平台官方二维码确认登录";
     $("rain-qr").hidden = assist;
+    $("rain-qr-frame").hidden = assist;
     $("rain-assist").hidden = !assist;
     if (assist) {
       $("assist-instance").value = location.origin;
@@ -295,7 +383,14 @@
     const upcoming = events.filter((event) => ["pending", "deferred", "retry"].includes(event.status)).sort((a, b) => (timestamp(a.due_at)?.getTime() ?? Infinity) - (timestamp(b.due_at)?.getTime() ?? Infinity)).slice(0, 3);
     $("upcoming-list").replaceChildren();
     if (!upcoming.length) $("upcoming-list").append(node("p", "upcoming-empty", "暂无等待发送的提醒。任务同步后，已安排的提醒会显示在这里。"));
-    for (const event of upcoming) { const item = node("div", "upcoming-item"); const dot = node("span", "timeline-dot"); dot.setAttribute("aria-hidden", "true"); const content = node("div"); content.append(node("p", "upcoming-title", eventTitle(event)), node("p", "upcoming-meta", eventNames[event.kind] || event.kind || "任务提醒"), node("p", "upcoming-time", formatDate(event.due_at, true))); item.append(dot, content); $("upcoming-list").append(item); }
+    for (const [index, event] of upcoming.entries()) {
+      const item = node("div", "upcoming-item");
+      item.append(node("span", "upcoming-index", String(index + 1).padStart(2, "0")));
+      const content = node("div", "upcoming-body");
+      content.append(node("p", "upcoming-title", eventTitle(event)), node("p", "upcoming-meta", eventNames[event.kind] || event.kind || "任务提醒"), node("p", "upcoming-time", formatDate(event.due_at, true)));
+      item.append(content);
+      $("upcoming-list").append(item);
+    }
     $("event-count").textContent = events.length;
     $("events-empty").hidden = events.length > 0;
     $("event-list").replaceChildren();
@@ -331,7 +426,15 @@
     $("stat-platforms").textContent = state.platforms.filter((platform) => ["logged_in", "authenticated", "active"].includes(platform.login_status)).length;
     $("stat-platform-total").textContent = ` / ${state.platforms.length}`;
     const recent = state.platforms.map((platform) => timestamp(platform.last_success)).filter(Boolean).sort((a, b) => b - a)[0];
-    $("stat-sync").textContent = recent ? `最近同步 ${formatDate(recent, true)}` : "等待首次成功同步";
+    $("stat-sync").textContent = recent ? formatDate(recent, true) : "尚无成功记录";
+    const next = pending
+      .map((task) => ({ task, moment: nextMoment(task) }))
+      .filter((entry) => entry.moment)
+      .sort((a, b) => a.moment.at - b.moment.at)[0];
+    $("next-block").classList.toggle("is-empty", !next);
+    $("next-title").textContent = next ? next.task.title : "暂无临近截止";
+    $("next-when").textContent = next ? `${next.moment.label} · ${formatDate(next.moment.at, true)}` : "等待平台提供新的任务";
+    $("next-countdown").textContent = next ? relativeLabel(next.moment.at, next.moment.verb) : "—";
     const selectedPlatform = $("platform-filter").value;
     $("platform-filter").replaceChildren(new Option("全部平台", "all"));
     const ids = new Set([...state.platforms.map((platform) => platform.id), ...state.tasks.map((task) => task.platform)].filter(Boolean));
@@ -360,9 +463,20 @@
     const inClassLessons = Array.isArray(runtime.in_class_lessons) ? runtime.in_class_lessons : [];
     const inClassState = !inClassOn ? "已关闭" : runtime.in_class_error ? runtime.in_class_error : inClassLessons.length ? `正在上课 · ${inClassLessons.join("、")}` : runtime.in_class_last_check_at ? `守候中 · ${formatDate(runtime.in_class_last_check_at, true)}` : "等待首次检查";
     const inClassRecent = runtime.in_class_last_quiz_at ? `${runtime.in_class_last_quiz || "课上答题"} · ${formatDate(runtime.in_class_last_quiz_at, true)}` : "暂无检测记录";
-    for (const [label, value] of [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["课上答题监测", inClassState], ["最近课上答题", inClassRecent], ["通知运行状态", runtime.notification_error || "正常"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"]]) { const card = node("article", "runtime-card"); card.append(node("span", "", label), node("strong", "", value)); $("runtime-grid").append(card); }
+    const readouts = [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["课上答题监测", inClassState], ["最近课上答题", inClassRecent], ["通知运行状态", runtime.notification_error || "正常"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"]];
+    readouts.forEach(([label, value], index) => {
+      const card = node("article", "runtime-card");
+      if (index === readouts.length - 1) card.classList.add("runtime-card--wide");
+      card.append(node("span", "", label), node("strong", "", value));
+      $("runtime-grid").append(card);
+    });
     $("version").textContent = runtime.version ? `· ${runtime.version}` : "";
-    try { $("today").textContent = new Intl.DateTimeFormat("zh-CN", { dateStyle: "full", timeZone: settings.timezone || "Asia/Shanghai" }).format(new Date()); } catch { $("today").textContent = new Date().toLocaleDateString("zh-CN"); }
+    try {
+      const zone = settings.timezone || "Asia/Shanghai";
+      const day = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", timeZone: zone }).format(new Date()).replace(/[/-]/g, ".");
+      const week = new Intl.DateTimeFormat("zh-CN", { weekday: "long", timeZone: zone }).format(new Date());
+      $("today").textContent = `${day} · ${week}`;
+    } catch { $("today").textContent = new Date().toLocaleDateString("zh-CN"); }
     updateFilterTabs(); renderTasks(); renderPlatforms(); renderEvents();
   }
   function refreshState(showSuccess = false) {
@@ -453,6 +567,26 @@
       if (settings.quiet_enabled && settings.quiet_start === settings.quiet_end) throw new Error("静默开始和结束时间应不同；全天接收提醒可关闭静默时段。");
       await api("/api/settings", "PUT", settings); settingsDirty = false; if (await refreshState()) notify("提醒规则已保存。");
     });
+  });
+  function syncThemeControls() {
+    const dark = document.documentElement?.dataset.theme === "dark";
+    document.querySelectorAll("[data-theme-toggle]").forEach((button) => button.setAttribute("aria-pressed", String(dark)));
+  }
+  document.querySelectorAll("[data-theme-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const root = document.documentElement;
+    if (!root) return;
+    const next = root.dataset.theme === "dark" ? "light" : "dark";
+    root.dataset.theme = next;
+    try { localStorage.setItem("dueradar-theme", next); } catch { /* Storage may be blocked. */ }
+    syncThemeControls();
+  }));
+  syncThemeControls();
+  $("filter-toggle").addEventListener("click", () => {
+    const toolbar = $("task-toolbar");
+    const open = !toolbar.classList.contains("is-open");
+    toolbar.classList.toggle("is-open", open);
+    $("filter-toggle").setAttribute("aria-expanded", String(open));
+    $("filter-toggle").setAttribute("aria-label", open ? "收起筛选" : "展开筛选");
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && authenticated) refreshState(); });
   setInterval(() => { if (authenticated && !document.hidden) refreshState(); }, 30000);
