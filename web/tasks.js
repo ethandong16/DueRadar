@@ -11,14 +11,43 @@
     return Number.isFinite(date) ? date : null;
   }
   // Academic year starts in September; February through August still belong to
-  // the spring term until the new academic year begins.
-  function semester(now) {
-    const date = new Date(now);
-    const year = date.getFullYear();
-    const month = date.getMonth();
-    if (month === 0) return { start: new Date(year - 1, 8, 1).getTime(), key: (year - 1) * 2 };
-    if (month >= 8) return { start: new Date(year, 8, 1).getTime(), key: year * 2 };
-    return { start: new Date(year, 1, 15).getTime(), key: (year - 1) * 2 + 1 };
+  // the spring term until the new academic year begins. Boundaries are computed
+  // in the reminder timezone, matching the server, so the fallback does not
+  // depend on the browser's own clock settings.
+  const defaultTimezone = "Asia/Shanghai";
+  function zonedParts(date, timeZone) {
+    const format = new Intl.DateTimeFormat("en-US", { timeZone, hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const parts = {};
+    for (const { type, value } of format.formatToParts(date)) parts[type] = value;
+    return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day), hour: Number(parts.hour) % 24, minute: Number(parts.minute), second: Number(parts.second) };
+  }
+  // Absolute instant of a wall-clock midnight in the given timezone.
+  function zonedInstant(year, monthIndex, day, timeZone) {
+    const wall = Date.UTC(year, monthIndex, day);
+    let guess = wall;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const parts = zonedParts(new Date(guess), timeZone);
+      const rendered = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+      const drift = rendered - wall;
+      if (!drift) break;
+      guess -= drift;
+    }
+    return guess;
+  }
+  function semester(now, timeZone = defaultTimezone) {
+    let zone = timeZone;
+    let parts;
+    try {
+      parts = zonedParts(new Date(now), zone);
+    } catch {
+      zone = "UTC";
+      parts = zonedParts(new Date(now), zone);
+    }
+    const year = parts.year;
+    const month = parts.month - 1;
+    if (month === 0) return { start: zonedInstant(year - 1, 8, 1, zone), key: (year - 1) * 2 };
+    if (month >= 8) return { start: zonedInstant(year, 8, 1, zone), key: year * 2 };
+    return { start: zonedInstant(year, 1, 15, zone), key: (year - 1) * 2 + 1 };
   }
   const termPattern = /(20\d{2})\s*-\s*(20\d{2})\s*-\s*([12])/;
   function courseKey(task) {
@@ -27,8 +56,8 @@
   // A course belongs to an earlier semester when every dated task is before this
   // term, or, for courses without deadlines (videos), when its name carries an
   // older academic term. Undated, unlabelled courses stay visible.
-  function scopeInfo(tasks, now = Date.now()) {
-    const current = semester(now);
+  function scopeInfo(tasks, now = Date.now(), timezone = defaultTimezone) {
+    const current = semester(now, timezone);
     const groups = new Map();
     for (const task of tasks) {
       const key = courseKey(task);
@@ -46,9 +75,9 @@
     return { start: current.start, key: current.key, groups };
   }
   function scopeTasks(tasks, options = {}) {
-    const { scope = "current", now = Date.now() } = options;
+    const { scope = "current", now = Date.now(), timezone = defaultTimezone } = options;
     if (scope === "all") return tasks.slice();
-    const info = scopeInfo(tasks, now);
+    const info = scopeInfo(tasks, now, timezone);
     // The server classifies the semester once for both the list and reminders;
     // fall back to the local heuristic for snapshots that predate the flag.
     return tasks.filter((task) => typeof task.historical === "boolean" ? !task.historical : !info.groups.get(courseKey(task)).historical);
@@ -64,9 +93,9 @@
     return group === "upcoming" ? 0 : group === "no_due" ? 1 : 3;
   }
   function select(tasks, options = {}) {
-    const { status = "all", platform = "all", kind = "all", timing = "all", query = "", scope = "current", now = Date.now(), platformLabel = (id) => id } = options;
+    const { status = "all", platform = "all", kind = "all", timing = "all", query = "", scope = "current", now = Date.now(), timezone = defaultTimezone, platformLabel = (id) => id } = options;
     const search = query.trim().toLocaleLowerCase();
-    return scopeTasks(tasks, { scope, now }).filter((task) =>
+    return scopeTasks(tasks, { scope, now, timezone }).filter((task) =>
       (status === "all" || task.status === status) &&
       (platform === "all" || task.platform === platform) &&
       (kind === "all" || task.kind === kind) &&

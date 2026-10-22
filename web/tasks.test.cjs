@@ -58,9 +58,17 @@ test("server semester flags take precedence over local heuristics", () => {
   assert.deepEqual(select(flagged,{now,kind:"video"}).map(t=>t.id), ["server-new"]);
 });
 test("academic terms roll over in September and February", () => {
-  const start = (value) => semester(Date.parse(value)).start;
-  assert.equal(start("2026-09-01T12:00:00+08:00"), new Date(2026,8,1).getTime());
-  assert.equal(start("2026-08-31T12:00:00+08:00"), new Date(2026,1,15).getTime());
-  assert.equal(start("2027-01-10T12:00:00+08:00"), new Date(2026,8,1).getTime());
-  assert.equal(start("2027-02-20T12:00:00+08:00"), new Date(2027,1,15).getTime());
+  const start = (value) => new Date(semester(Date.parse(value), "Asia/Shanghai").start).toISOString();
+  assert.equal(start("2026-09-01T12:00:00+08:00"), "2026-08-31T16:00:00.000Z");
+  assert.equal(start("2026-08-31T12:00:00+08:00"), "2026-02-14T16:00:00.000Z");
+  assert.equal(start("2027-01-10T12:00:00+08:00"), "2026-08-31T16:00:00.000Z");
+  assert.equal(start("2027-02-20T12:00:00+08:00"), "2027-02-14T16:00:00.000Z");
+});
+test("semester boundaries follow the configured timezone, not the host clock", () => {
+  const stamp = Date.parse("2026-10-22T10:00:00+08:00");
+  assert.equal(new Date(semester(stamp, "Asia/Shanghai").start).toISOString(), "2026-08-31T16:00:00.000Z");
+  assert.equal(new Date(semester(stamp, "UTC").start).toISOString(), "2026-09-01T00:00:00.000Z");
+  // A deadline at the first minute of the term belongs to the current semester.
+  const boundary = [{ id: "term", status: "pending", kind: "homework", platform: "rain", title: "Term start", due_at: "2026-09-01T00:00:00+08:00" }];
+  assert.equal(scopeTasks(boundary, { now: stamp, timezone: "Asia/Shanghai" }).length, 1);
 });

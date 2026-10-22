@@ -132,8 +132,9 @@
     $("task-count").textContent = filtered.length;
     $("task-list").replaceChildren();
     if (!filtered.length) {
-      const scoped = DueRadarTasks.scopeTasks(tasks, { scope });
-      const hiddenHistory = DueRadarTasks.scopeTasks(tasks, { scope: "all" }).length > DueRadarTasks.scopeTasks(tasks, { scope: "current" }).length;
+      const zone = state.settings?.timezone || defaults.timezone;
+      const scoped = DueRadarTasks.scopeTasks(tasks, { scope, timezone: zone });
+      const hiddenHistory = DueRadarTasks.scopeTasks(tasks, { scope: "all", timezone: zone }).length > DueRadarTasks.scopeTasks(tasks, { scope: "current", timezone: zone }).length;
       if (scope === "current" && hiddenHistory) {
         $("task-list").append(emptyState("本学期暂无任务", "上学期的课程与课程视频已默认收起，可以展开查看。", { label: "查看历史学期", run: () => { $("scope-filter").value = "all"; taskPage = 1; render(); } }));
       } else if (scoped.length) {
@@ -171,7 +172,7 @@
     }
     $("task-list").append(fragment);
   }
-  function updateFilterTabs() { const scoped = DueRadarTasks.scopeTasks(state?.tasks || [], { scope: $("scope-filter").value }); document.querySelectorAll("[data-status]").forEach((button) => { const active = button.dataset.status === statusFilter; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); const status = button.dataset.status; const count = scoped.filter(task => status === "all" || task.status === status).length; button.textContent = `${status === "all" ? "全部" : taskStatus[status][0]} ${count}`; }); }
+  function updateFilterTabs() { const scoped = DueRadarTasks.scopeTasks(state?.tasks || [], { scope: $("scope-filter").value, timezone: state?.settings?.timezone || defaults.timezone }); document.querySelectorAll("[data-status]").forEach((button) => { const active = button.dataset.status === statusFilter; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); const status = button.dataset.status; const count = scoped.filter(task => status === "all" || task.status === status).length; button.textContent = `${status === "all" ? "全部" : taskStatus[status][0]} ${count}`; }); }
   function renderPlatforms() {
     $("platform-list").replaceChildren();
     if (!state.platforms.length) { $("platform-list").append(emptyState("暂无平台信息", "服务尚未返回平台状态，请稍后刷新运行状态。")); return; }
@@ -317,7 +318,7 @@
     $("in-class-poll").value = settings.in_class_poll_seconds || defaults.in_class_poll_seconds;
   }
   function render() {
-    const tasks = DueRadarTasks.scopeTasks(state.tasks, { scope: $("scope-filter").value });
+    const tasks = DueRadarTasks.scopeTasks(state.tasks, { scope: $("scope-filter").value, timezone: state.settings?.timezone || defaults.timezone });
     const pending = tasks.filter((task) => task.status === "pending");
     $("stat-pending").textContent = pending.length;
     const overdue = pending.filter(task => DueRadarTasks.timeGroup(task, Date.now()) === "overdue").length;
