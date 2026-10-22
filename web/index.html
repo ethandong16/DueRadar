@@ -31,7 +31,7 @@
       <footer class="page-footer"><span>DueRadar <span id="version"></span></span><span>让每个截止日，都在视线之内。</span></footer></div>
     </main>
   </div>
-  <dialog id="rain-dialog" class="login-dialog" aria-labelledby="rain-title"><h2 id="rain-title">绑定普通雨课堂</h2><p>通过平台官方二维码确认登录</p><img id="rain-qr" alt="雨课堂登录二维码" width="300" height="300"><p id="rain-login-status" role="status"></p><button id="rain-close" class="button secondary" type="button">关闭</button></dialog>
+  <dialog id="rain-dialog" class="login-dialog" aria-labelledby="rain-title"><h2 id="rain-title">绑定普通雨课堂</h2><p id="rain-description">通过平台官方二维码确认登录</p><img id="rain-qr" alt="雨课堂登录二维码" width="300" height="300"><div id="rain-assist" class="assist-panel" hidden><p>在电脑的 DueRadar 项目目录启动辅助程序，按提示填写下面的信息。</p><code>python scripts/rain_assist.py</code><label for="assist-instance">实例地址</label><input id="assist-instance" readonly autocomplete="off" spellcheck="false"><label for="assist-flow">流程编号</label><input id="assist-flow" readonly autocomplete="off" spellcheck="false"><label for="assist-code">一次性配对码</label><input id="assist-code" readonly autocomplete="off" spellcheck="false"><p id="assist-expires" class="field-hint"></p><p class="field-hint">账号密码只在雨课堂官方页面填写。首次使用请阅读<a class="task-source" href="https://github.com/ethandong16/due-radar/blob/main/docs/DESKTOP-LOGIN.md" target="_blank" rel="noopener noreferrer">电脑辅助登录说明 ↗</a>。</p></div><p id="rain-login-status" role="status"></p><button id="rain-close" class="button secondary" type="button">关闭</button></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

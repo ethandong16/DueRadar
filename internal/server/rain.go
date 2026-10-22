@@ -33,6 +33,7 @@ func (s *Server) startRainLogin(w http.ResponseWriter, r *http.Request) {
 	if s.rainCancel != nil {
 		s.rainCancel()
 	}
+	s.supersedeRainAssistLocked()
 	if s.rainSyncCancel != nil {
 		s.rainSyncCancel()
 		s.rainSyncCancel = nil
@@ -152,7 +153,8 @@ func (s *Server) rainLoginStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) cancelRainLogin(w http.ResponseWriter, r *http.Request) {
 	s.rainMu.Lock()
-	canceled := s.rainState == "initializing" || s.rainState == "waiting"
+	// A late QR dialog dismissal must not cancel a newer assisted flow.
+	canceled := s.rainAssistActive == nil && (s.rainState == "initializing" || s.rainState == "waiting")
 	if canceled {
 		s.rainGeneration++
 		if s.rainCancel != nil {

@@ -1,0 +1,3 @@
+# Optional desktop companion only; 小型 Linux 设备's Go service needs no Python browser.
+# Desktop Python 3.10+; the device remains browser-free.
+playwright==1.64.0

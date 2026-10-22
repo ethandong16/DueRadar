@@ -63,6 +63,8 @@ type Server struct {
 	rainGeneration    uint64
 	rainCancel        context.CancelFunc
 	rainSyncCancel    context.CancelFunc
+	rainAssists       map[string]*rainAssist
+	rainAssistActive  *rainAssist
 	lifetime          context.Context
 	lifetimeCancel    context.CancelFunc
 	lifeMu            sync.Mutex
@@ -109,6 +111,12 @@ func (s *Server) Handler(files fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/accounts/zhidao/login/cancel", s.protected(s.cancelZhidaoLogin))
 	mux.HandleFunc("GET /api/accounts/rain/login", s.protected(s.rainLoginStatus))
 	mux.HandleFunc("POST /api/accounts/rain/login/cancel", s.protected(s.cancelRainLogin))
+	mux.HandleFunc("POST /api/accounts/rain/assist", s.protected(s.startRainAssist))
+	mux.HandleFunc("GET /api/accounts/rain/assist/{id}", s.protected(s.rainAssistStatus))
+	mux.HandleFunc("POST /api/accounts/rain/assist/{id}/cancel", s.protected(s.cancelRainAssist))
+	mux.HandleFunc("POST /api/accounts/rain/assist/{id}/connect", s.connectRainAssist)
+	mux.HandleFunc("GET /api/accounts/rain/assist/{id}/helper", s.rainAssistHelperStatus)
+	mux.HandleFunc("POST /api/accounts/rain/assist/{id}/session", s.uploadRainAssist)
 	mux.HandleFunc("GET /api/events", s.protected(func(w http.ResponseWriter, r *http.Request) {
 		events := s.Engine.Snapshot().Events
 		sort.SliceStable(events, func(i, j int) bool { return events[i].CreatedAt.After(events[j].CreatedAt) })
@@ -265,6 +273,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		delete(s.sessions, c.Value)
 		s.mu.Unlock()
+		s.cancelRainAssistOwner(c.Value)
 	}
 	http.SetCookie(w, &http.Cookie{Name: "dueradar_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.SecureCookies, SameSite: http.SameSiteStrictMode})
 	jsonResponse(w, 200, map[string]bool{"ok": true})

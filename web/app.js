@@ -176,51 +176,93 @@
       if (["rain", "zhidao_campus"].includes(platform.id) && platform.ready && !state.demo) {
         const bind = node("button", "button primary", platform.login_status === "logged_in" ? "重新扫码绑定" : (platform.id === "rain" ? "微信扫码绑定" : "知到 APP 扫码绑定"));
         bind.type = "button"; bind.addEventListener("click", () => busy(bind, () => openRainLogin(platform.id))); card.append(bind);
+        if (platform.id === "rain") {
+          const assist = node("button", "button secondary assist-button", "账号密码登录（电脑辅助）");
+          assist.type = "button"; assist.addEventListener("click", () => busy(assist, () => openRainLogin("rain", "assist"))); card.append(assist);
+        }
       }
       $("platform-list").append(card);
     }
   }
   let activeLogin;
+  function clearLoginSecrets() {
+    $("rain-qr").removeAttribute("src");
+    for (const id of ["assist-instance", "assist-flow", "assist-code"]) $(id).value = "";
+    $("assist-expires").textContent = "";
+  }
   function clearActiveLogin() {
     const login = activeLogin;
     activeLogin = null;
     if (!login) return;
     clearTimeout(login.timer);
-    $("rain-qr").removeAttribute("src");
+    clearLoginSecrets();
     if ($("rain-dialog").open) $("rain-dialog").close();
   }
-  async function openRainLogin(id) {
-    if (activeLogin) { notify("请先完成或关闭当前扫码绑定。"); return; }
-    const login = { path: id === "rain" ? "/api/accounts/rain/login" : "/api/accounts/zhidao/login", timer: null, completed: false };
+  async function openRainLogin(id, mode = "qr") {
+    if (activeLogin) { notify("请先完成或关闭当前账号绑定。"); return; }
+    const assist = id === "rain" && mode === "assist";
+    const login = { path: assist ? "/api/accounts/rain/assist" : id === "rain" ? "/api/accounts/rain/login" : "/api/accounts/zhidao/login", timer: null, completed: false, assist };
     activeLogin = login;
+    clearLoginSecrets();
     const label = id === "rain" ? "普通雨课堂" : "知到";
     const scanner = id === "rain" ? "微信" : "知到 APP";
     let result;
     try { result = await api(login.path, "POST"); }
     catch (error) {
-      if (error.name !== "StaleSessionError" && activeLogin === login) {
+      if (!assist && error.name !== "StaleSessionError" && activeLogin === login) {
         try { await api(`${login.path}/cancel`, "POST"); } catch (_) { /* Keep the original creation error. */ }
       }
       if (activeLogin === login) activeLogin = null;
       throw error;
     }
     if (activeLogin !== login) return;
-    $("rain-title").textContent = `绑定${label}`;
-    $("rain-qr").alt = `${label}官方登录二维码`;
-    $("rain-qr").src = result.image;
-    $("rain-login-status").textContent = `请使用${scanner}扫码，并在手机上确认登录。二维码约 3 分钟有效。`;
+    login.deadline = assist ? Date.parse(result.expires_at) : Date.now() + (result.expires_in || 180) * 1000;
+    if (assist) login.path += `/${encodeURIComponent(result.flow_id)}`;
+    $("rain-title").textContent = assist ? "电脑辅助登录普通雨课堂" : `绑定${label}`;
+    $("rain-description").textContent = assist ? "在电脑上打开官方登录页，输入账号密码并完成平台验证。" : "通过平台官方二维码确认登录";
+    $("rain-qr").hidden = assist;
+    $("rain-assist").hidden = !assist;
+    if (assist) {
+      $("assist-instance").value = location.origin;
+      $("assist-flow").value = result.flow_id;
+      $("assist-code").value = result.pairing_code;
+      $("assist-expires").textContent = `配对有效至 ${new Date(result.expires_at).toLocaleTimeString("zh-CN")}，关闭弹窗将取消本次绑定。`;
+      $("rain-login-status").textContent = "等待电脑辅助程序连接。";
+    } else {
+      $("rain-qr").alt = `${label}官方登录二维码`;
+      $("rain-qr").src = result.image;
+      $("rain-login-status").textContent = `请使用${scanner}扫码，并在手机上确认登录。二维码约 3 分钟有效。`;
+    }
     login.opened = true;
     $("rain-dialog").showModal();
     async function poll() {
       if (activeLogin !== login || !$("rain-dialog").open) return;
+      if (Date.now() >= login.deadline) {
+        clearLoginSecrets();
+        $("rain-login-status").textContent = "绑定已过期，请关闭后重新开始。";
+        return;
+      }
       try {
         const result = await api(login.path);
         if (activeLogin !== login || !$("rain-dialog").open) return;
         if (result.state === "logged_in") { login.completed = true; $("rain-dialog").close(); notify(`${label}登录已确认，正在读取任务。`); await refreshState(); return; }
-        if (result.state === "failed") { $("rain-login-status").textContent = result.error || "二维码失效，请关闭后重新绑定。"; return; }
-        if (result.state === "canceled" || !$("rain-dialog").open) return;
+        if (["failed", "expired", "canceled"].includes(result.state)) {
+          clearLoginSecrets();
+          $("rain-login-status").textContent = result.error || (result.state === "expired" ? "绑定已过期，请关闭后重新开始。" : result.state === "canceled" ? "本次绑定已取消。" : "登录未完成，请关闭后重新绑定。");
+          return;
+        }
+        if (assist) {
+          const messages = { awaiting_helper: "等待电脑辅助程序连接。", awaiting_user: "辅助程序已连接，请在官方页面完成账号密码和验证码登录。", verifying: "设备正在独立验证登录会话，请稍候。" };
+          $("rain-login-status").textContent = messages[result.state] || "等待登录结果。";
+          if (result.state !== "awaiting_helper") $("assist-code").value = "";
+        }
         login.timer = setTimeout(poll, 2000);
-      } catch (error) { if (activeLogin === login && $("rain-dialog").open) $("rain-login-status").textContent = error.message; }
+      } catch (error) {
+        if (activeLogin === login && $("rain-dialog").open) {
+          $("rain-login-status").textContent = `暂未取得登录状态，正在重试：${error.message}`;
+          login.timer = setTimeout(poll, 2000);
+        }
+      }
     }
     login.timer = setTimeout(poll, 1500);
   }
@@ -231,7 +273,7 @@
     // replacement flow that is creating its QR or has already reopened.
     if (!login || !login.opened || $("rain-dialog").open) return;
     clearTimeout(login.timer);
-    $("rain-qr").removeAttribute("src");
+    clearLoginSecrets();
     try { if (!login.completed) await api(`${login.path}/cancel`, "POST"); }
     catch (_) { /* Closing the dialog still releases the local flow. */ }
     finally { if (activeLogin === login) activeLogin = null; }
