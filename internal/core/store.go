@@ -52,6 +52,15 @@ func Open(path string) (*Engine, error) {
 	if e.state.Version != 1 {
 		return nil, errors.New("unsupported state version")
 	}
+	// In-class monitoring arrived after the first state format. A missing poll
+	// interval marks an older file, which is migrated once to the new defaults.
+	if e.state.Settings.InClassPollSeconds == 0 {
+		e.state.Settings.InClassEnabled = true
+		e.state.Settings.InClassPollSeconds = DefaultInClassPollSeconds
+		if err = e.save(e.state); err != nil {
+			return nil, fmt.Errorf("migrate state: %w", err)
+		}
+	}
 	if err = ValidateSettings(e.state.Settings); err != nil {
 		return nil, fmt.Errorf("invalid stored settings: %w", err)
 	}
@@ -98,6 +107,12 @@ func cloneState(s State) State {
 	copy.Settings.DeadlineMinutes = slices.Clone(s.Settings.DeadlineMinutes)
 	copy.Settings.ExamStartMinutes = slices.Clone(s.Settings.ExamStartMinutes)
 	copy.Settings.VideoMinutes = slices.Clone(s.Settings.VideoMinutes)
+	if s.InClassSeen != nil {
+		copy.InClassSeen = make(map[string]time.Time, len(s.InClassSeen))
+		for key, seen := range s.InClassSeen {
+			copy.InClassSeen[key] = seen
+		}
+	}
 	return copy
 }
 

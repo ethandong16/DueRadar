@@ -35,6 +35,9 @@ func ValidateSettings(s Settings) error {
 	if s.QuietEnabled && start == end {
 		return errors.New("quiet start and end must differ")
 	}
+	if s.InClassPollSeconds != 0 && (s.InClassPollSeconds < 10 || s.InClassPollSeconds > 300) {
+		return errors.New("in-class poll seconds must be between 10 and 300")
+	}
 	for _, offsets := range [][]int{s.DeadlineMinutes, s.ExamStartMinutes, s.VideoMinutes} {
 		if len(offsets) > 32 {
 			return errors.New("at most 32 reminders per type")
@@ -92,6 +95,9 @@ func (e *Engine) UpdateSettings(settings Settings) error {
 // UpdateSettingsAt permits a deterministic administrative update in tests and
 // import tools. New schedules start from now and do not backfill past offsets.
 func (e *Engine) UpdateSettingsAt(settings Settings, now time.Time) error {
+	if settings.InClassPollSeconds == 0 {
+		settings.InClassPollSeconds = DefaultInClassPollSeconds
+	}
 	if err := ValidateSettings(settings); err != nil {
 		return err
 	}
@@ -418,6 +424,12 @@ func eventValid(s *State, ev Event, now time.Time) bool {
 		}
 		return false
 	}
+	// An in-class quiz is only useful while the class is running. A delivery
+	// that could not be made within the window is dropped instead of arriving
+	// after the answer period has closed.
+	if ev.Kind == "in_class" {
+		return !now.After(ev.DueAt.Add(InClassWindow))
+	}
 	for _, t := range s.Tasks {
 		if t.Platform != ev.Platform || t.ID != ev.TaskID {
 			continue
@@ -523,7 +535,14 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 			fresh := false
 			for _, a := range s.Accounts {
 				if a.Platform == ev.Platform {
-					fresh = !a.NeedsRevalidation && a.SyncState == "success" && a.LastSuccessAt != nil && now.Sub(*a.LastSuccessAt) <= FreshnessLimit
+					if ev.Kind == "in_class" {
+						// The fast in-class loop produced this event moments ago,
+						// so a full 15-minute task sync is not required. A login
+						// that needs revalidation still blocks delivery.
+						fresh = !a.NeedsRevalidation
+					} else {
+						fresh = !a.NeedsRevalidation && a.SyncState == "success" && a.LastSuccessAt != nil && now.Sub(*a.LastSuccessAt) <= FreshnessLimit
+					}
 					break
 				}
 			}
@@ -531,8 +550,7 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 				continue
 			}
 		}
-		urgent := ev.Kind == "exam_start" && ev.MinutesBefore == 60 || (ev.Kind == "deadline" || ev.Kind == "video_deadline") && ev.MinutesBefore == 30
-		if IsQuiet(s.Settings, now) && !urgent {
+		if IsQuiet(s.Settings, now) && !urgentEvent(*ev) {
 			continue
 		}
 		// Keep event identity and due time stable while sending the latest task

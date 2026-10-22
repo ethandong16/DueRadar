@@ -35,10 +35,19 @@ type Settings struct {
 	DeadlineMinutes  []int  `json:"deadline_minutes"`
 	ExamStartMinutes []int  `json:"exam_start_minutes"`
 	VideoMinutes     []int  `json:"video_minutes"`
+	// InClass watches live Rain Classroom lessons and notifies as soon as a new
+	// answerable activity is pushed. PollSeconds is the fast-loop interval.
+	InClassEnabled     bool `json:"in_class_enabled"`
+	InClassPollSeconds int  `json:"in_class_poll_seconds"`
 }
 
+// DefaultInClassPollSeconds keeps a live class responsive without hammering the
+// platform. A class quiz is usually answered within minutes, so 20 seconds is
+// the compromise between latency and request volume on a small device.
+const DefaultInClassPollSeconds = 20
+
 func DefaultSettings() Settings {
-	return Settings{Timezone: "Asia/Shanghai", QuietEnabled: true, QuietStart: "23:00", QuietEnd: "08:00", DeadlineMinutes: []int{1440, 180, 30}, ExamStartMinutes: []int{1440, 60}, VideoMinutes: []int{4320, 1440, 180}}
+	return Settings{Timezone: "Asia/Shanghai", QuietEnabled: true, QuietStart: "23:00", QuietEnd: "08:00", DeadlineMinutes: []int{1440, 180, 30}, ExamStartMinutes: []int{1440, 60}, VideoMinutes: []int{4320, 1440, 180}, InClassEnabled: true, InClassPollSeconds: DefaultInClassPollSeconds}
 }
 
 type Account struct {
@@ -77,4 +86,8 @@ type State struct {
 	Events   []Event   `json:"events"`
 	Accounts []Account `json:"accounts"`
 	Settings Settings  `json:"settings"`
+	// InClassSeen records already-handled in-class activities so a restart or a
+	// repeated poll cannot notify the same quiz twice. Values are detection times
+	// and are pruned after a week.
+	InClassSeen map[string]time.Time `json:"in_class_seen,omitempty"`
 }

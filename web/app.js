@@ -2,11 +2,11 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const defaults = { deadline_minutes: [1440, 180, 30], exam_start_minutes: [1440, 60], video_minutes: [4320, 1440, 180], quiet_enabled: true, quiet_start: "23:00", quiet_end: "08:00", timezone: "Asia/Shanghai" };
+  const defaults = { deadline_minutes: [1440, 180, 30], exam_start_minutes: [1440, 60], video_minutes: [4320, 1440, 180], quiet_enabled: true, quiet_start: "23:00", quiet_end: "08:00", timezone: "Asia/Shanghai", in_class_enabled: true, in_class_poll_seconds: 20 };
   const viewNames = { tasks: "任务总览", accounts: "平台账号", settings: "通知设置", activity: "运行记录" };
   const kindNames = { homework: "作业", exam: "考试", chapter: "章节测试", video: "视频学习" };
   const taskStatus = { pending: ["待完成", "warning"], completed: ["已完成", "success"], unknown: ["状态未知", "neutral"] };
-  const eventNames = { new_task: "新任务", new: "新任务", deadline: "截止提醒", exam_start: "考试开始", video_deadline: "视频截止", time_changed: "时间变更", changed: "时间变更", login_expired: "登录过期", sync_failure: "同步故障", sync_failed: "同步故障", platform_failure: "平台故障", overdue: "截止提醒" };
+  const eventNames = { new_task: "新任务", new: "新任务", deadline: "截止提醒", exam_start: "考试开始", video_deadline: "视频截止", time_changed: "时间变更", changed: "时间变更", login_expired: "登录过期", sync_failure: "同步故障", sync_failed: "同步故障", platform_failure: "平台故障", overdue: "截止提醒", in_class: "课上答题" };
   const eventStatuses = { pending: ["等待发送", "neutral"], deferred: ["静默延后", "neutral"], sent: ["已发送", "success"], failed: ["发送失败", "danger"], retry: ["等待重试", "warning"], skipped: ["已跳过", "neutral"], cancelled: ["已取消", "neutral"], canceled: ["已取消", "neutral"], expired: ["已失效", "neutral"] };
   const loginStatuses = { demo: ["演示模式", "neutral"], unbound: ["未绑定", "neutral"], not_bound: ["未绑定", "neutral"], pending: ["等待验证", "warning"], waiting: ["等待验证", "warning"], logged_in: ["已登录", "success"], authenticated: ["已登录", "success"], active: ["已登录", "success"], expired: ["已过期", "danger"], failed: ["验证失败", "danger"], unsupported: ["待接入", "neutral"], unimplemented: ["待接入", "neutral"], not_configured: ["未配置", "neutral"] };
   const syncStatuses = { demo: ["示例数据", "neutral"], idle: ["等待同步", "neutral"], pending: ["等待同步", "neutral"], success: ["同步成功", "success"], ok: ["同步成功", "success"], syncing: ["同步中", "warning"], failed: ["同步失败", "danger"], error: ["同步失败", "danger"], blocked: ["等待登录", "warning"], unavailable: ["待接入", "neutral"], unsupported: ["待接入", "neutral"], unimplemented: ["待接入", "neutral"], not_configured: ["未配置", "neutral"] };
@@ -313,6 +313,8 @@
     $("quiet-start").value = settings.quiet_start || "23:00";
     $("quiet-end").value = settings.quiet_end || "08:00";
     $("timezone").value = settings.timezone || "Asia/Shanghai";
+    $("in-class-enabled").checked = settings.in_class_enabled !== false;
+    $("in-class-poll").value = settings.in_class_poll_seconds || defaults.in_class_poll_seconds;
   }
   function render() {
     const tasks = DueRadarTasks.scopeTasks(state.tasks, { scope: $("scope-filter").value });
@@ -342,6 +344,7 @@
     $("bark-status").textContent = barkConfigured ? "已配置" : "未配置";
     $("bark-status").className = `badge ${barkConfigured ? "success" : "neutral"}`;
     $("bark-test").disabled = !barkConfigured || state.demo;
+    $("in-class-test").disabled = !barkConfigured || state.demo;
     $("bark-form").querySelector("button[type=submit]").disabled = state.demo;
     $("bark-key").disabled = state.demo;
     $("bark-server").disabled = state.demo;
@@ -351,7 +354,11 @@
     const runtime = state.runtime || {};
     const uptime = Number.isFinite(runtime.uptime_seconds) ? `${Math.floor(runtime.uptime_seconds / 3600)} 小时 ${Math.floor(runtime.uptime_seconds % 3600 / 60)} 分钟` : "未知";
     const interval = Number.isFinite(runtime.scheduler_interval_seconds) ? `每 ${runtime.scheduler_interval_seconds} 秒` : "未知";
-    for (const [label, value] of [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["通知运行状态", runtime.notification_error || "正常"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"]]) { const card = node("article", "runtime-card"); card.append(node("span", "", label), node("strong", "", value)); $("runtime-grid").append(card); }
+    const inClassOn = runtime.in_class_enabled !== false;
+    const inClassLessons = Array.isArray(runtime.in_class_lessons) ? runtime.in_class_lessons : [];
+    const inClassState = !inClassOn ? "已关闭" : runtime.in_class_error ? runtime.in_class_error : inClassLessons.length ? `正在上课 · ${inClassLessons.join("、")}` : runtime.in_class_last_check_at ? `守候中 · ${formatDate(runtime.in_class_last_check_at, true)}` : "等待首次检查";
+    const inClassRecent = runtime.in_class_last_quiz_at ? `${runtime.in_class_last_quiz || "课上答题"} · ${formatDate(runtime.in_class_last_quiz_at, true)}` : "暂无检测记录";
+    for (const [label, value] of [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["课上答题监测", inClassState], ["最近课上答题", inClassRecent], ["通知运行状态", runtime.notification_error || "正常"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"]]) { const card = node("article", "runtime-card"); card.append(node("span", "", label), node("strong", "", value)); $("runtime-grid").append(card); }
     $("version").textContent = runtime.version ? `· ${runtime.version}` : "";
     try { $("today").textContent = new Intl.DateTimeFormat("zh-CN", { dateStyle: "full", timeZone: settings.timezone || "Asia/Shanghai" }).format(new Date()); } catch { $("today").textContent = new Date().toLocaleDateString("zh-CN"); }
     updateFilterTabs(); renderTasks(); renderPlatforms(); renderEvents();
@@ -433,10 +440,13 @@
     });
   });
   $("bark-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/bark/test", "POST"); notify(result.message || "Bark 服务已接受测试通知，请检查 iPhone。"); }));
+  $("in-class-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/in-class/test", "POST"); notify(result.message || "课上答题测试通知已发送，请检查 iPhone。"); }));
   $("settings-defaults").addEventListener("click", () => { populateSettings(defaults); settingsDirty = true; notify("已填入默认值，点击保存提醒规则后生效。"); });
   $("settings-form").addEventListener("submit", (event) => {
     event.preventDefault(); busy(event.submitter || $("settings-form").querySelector("button"), async () => {
-      const settings = { deadline_minutes: parseMinutes("deadline-minutes", "截止提醒"), exam_start_minutes: parseMinutes("exam-minutes", "考试开始"), video_minutes: parseMinutes("video-minutes", "视频截止"), quiet_enabled: $("quiet-enabled").checked, quiet_start: $("quiet-start").value, quiet_end: $("quiet-end").value, timezone: $("timezone").value.trim() };
+      const pollSeconds = Number.parseInt($("in-class-poll").value, 10);
+      if (!Number.isInteger(pollSeconds) || pollSeconds < 10 || pollSeconds > 300) throw new Error("课上答题检查间隔请填写 10—300 秒。");
+      const settings = { deadline_minutes: parseMinutes("deadline-minutes", "截止提醒"), exam_start_minutes: parseMinutes("exam-minutes", "考试开始"), video_minutes: parseMinutes("video-minutes", "视频截止"), quiet_enabled: $("quiet-enabled").checked, quiet_start: $("quiet-start").value, quiet_end: $("quiet-end").value, timezone: $("timezone").value.trim(), in_class_enabled: $("in-class-enabled").checked, in_class_poll_seconds: pollSeconds };
       try { new Intl.DateTimeFormat("zh-CN", { timeZone: settings.timezone }); } catch { throw new Error("请填写有效的 IANA 时区，例如 Asia/Shanghai。"); }
       if (settings.quiet_enabled && settings.quiet_start === settings.quiet_end) throw new Error("静默开始和结束时间应不同；全天接收提醒可关闭静默时段。");
       await api("/api/settings", "PUT", settings); settingsDirty = false; if (await refreshState()) notify("提醒规则已保存。");

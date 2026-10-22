@@ -1,0 +1,169 @@
+package platform
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// LiveLesson is a classroom that currently has a lesson in progress. Rain
+// Classroom exposes it on the student home page as "正在上课".
+type LiveLesson struct {
+	ClassroomID   string
+	LessonID      string
+	CourseName    string
+	ClassroomName string
+}
+
+// LiveActivity is one entry of the classroom activity feed. Only the fields the
+// in-class monitor needs are kept; unknown activities stay out of the decision.
+type LiveActivity struct {
+	ID           string
+	Type         int
+	Title        string
+	CoursewareID string
+	CreatedAt    time.Time
+	Deadline     *time.Time
+	ProblemCount int
+	TotalScore   float64
+}
+
+// Answerable reports whether the activity expects an answer from the student.
+// Observed types: 5 covers in-class quizzes and paper homework, 4 covers native
+// homework, 20 covers cloud exams. Courseware, slides, and announcements do not.
+func (a LiveActivity) Answerable() bool {
+	switch a.Type {
+	case 4, 5, 20:
+		return true
+	}
+	return false
+}
+
+// LiveLessons reads the independent on-lesson endpoint. An empty list is a
+// valid answer: the student simply has no class at the moment.
+func (r *Rain) LiveLessons(ctx context.Context) ([]LiveLesson, error) {
+	env, err := r.get(ctx, "/api/v3/classroom/on-lesson")
+	if err != nil {
+		return nil, err
+	}
+	if env.Code == nil {
+		return nil, errors.New("雨课堂在课状态响应格式变化")
+	}
+	if *env.Code != 0 {
+		return nil, ErrSessionExpired
+	}
+	var data struct {
+		Lessons *[]struct {
+			ClassroomID   json.Number `json:"classroomId"`
+			LessonID      json.Number `json:"lessonId"`
+			CourseName    string      `json:"courseName"`
+			ClassroomName string      `json:"classroomName"`
+		} `json:"onLessonClassrooms"`
+	}
+	if json.Unmarshal(env.Data, &data) != nil || data.Lessons == nil {
+		return nil, errors.New("雨课堂在课状态格式变化")
+	}
+	if len(*data.Lessons) > 50 {
+		return nil, errors.New("雨课堂在课班级数量超过上限")
+	}
+	lessons := make([]LiveLesson, 0, len(*data.Lessons))
+	seen := make(map[string]bool, len(*data.Lessons))
+	for _, item := range *data.Lessons {
+		if !rainPositiveID(item.ClassroomID) {
+			return nil, errors.New("雨课堂在课班级缺少标识")
+		}
+		classroomID := item.ClassroomID.String()
+		if seen[classroomID] {
+			continue
+		}
+		seen[classroomID] = true
+		lesson := LiveLesson{ClassroomID: classroomID, CourseName: strings.TrimSpace(item.CourseName), ClassroomName: strings.TrimSpace(item.ClassroomName)}
+		if rainPositiveID(item.LessonID) {
+			lesson.LessonID = item.LessonID.String()
+		}
+		if lesson.CourseName == "" {
+			lesson.CourseName = lesson.ClassroomName
+		}
+		if lesson.CourseName == "" {
+			lesson.CourseName = "雨课堂课堂"
+		}
+		lessons = append(lessons, lesson)
+	}
+	return lessons, nil
+}
+
+// LiveActivities reads the newest page of one classroom's activity feed. The
+// monitor only needs the first page: a quiz pushed during class is the newest
+// entry. Older pages are read by the normal 15-minute task synchronization.
+func (r *Rain) LiveActivities(ctx context.Context, classroomID string) ([]LiveActivity, error) {
+	if _, err := strconv.ParseUint(classroomID, 10, 64); err != nil {
+		return nil, errors.New("雨课堂班级标识无效")
+	}
+	env, err := r.get(ctx, "/v2/api/web/logs/learn/"+classroomID+"?actype=-1&page=0&offset=20&sort=-1")
+	if err != nil {
+		return nil, err
+	}
+	if err = rainCheckListEnvelope(env); err != nil {
+		return nil, err
+	}
+	var data struct {
+		Activities *[]struct {
+			ID           json.Number  `json:"id"`
+			Type         *int         `json:"type"`
+			Title        string       `json:"title"`
+			CoursewareID json.Number  `json:"courseware_id"`
+			CreateTime   *int64       `json:"create_time"`
+			Deadline     *int64       `json:"deadline"`
+			ProblemCount *int         `json:"problem_count"`
+			TotalScore   *json.Number `json:"total_score"`
+		} `json:"activities"`
+	}
+	if json.Unmarshal(env.Data, &data) != nil || data.Activities == nil {
+		return nil, errors.New("雨课堂课堂活动格式变化")
+	}
+	if len(*data.Activities) > 100 {
+		return nil, errors.New("雨课堂课堂活动数量超过上限")
+	}
+	activities := make([]LiveActivity, 0, len(*data.Activities))
+	seen := make(map[string]bool, len(*data.Activities))
+	for _, item := range *data.Activities {
+		if item.Type == nil || !rainPositiveID(item.ID) {
+			return nil, errors.New("雨课堂课堂活动缺少类型或标识")
+		}
+		id := item.ID.String()
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		activity := LiveActivity{ID: id, Type: *item.Type, Title: strings.TrimSpace(item.Title)}
+		if rainPositiveID(item.CoursewareID) {
+			activity.CoursewareID = item.CoursewareID.String()
+		}
+		if item.CreateTime != nil && *item.CreateTime != 0 {
+			if *item.CreateTime < 946684800000 || *item.CreateTime > 4102444800000 {
+				return nil, errors.New("雨课堂课堂活动时间格式变化")
+			}
+			activity.CreatedAt = time.UnixMilli(*item.CreateTime).UTC()
+		}
+		if item.Deadline != nil && *item.Deadline != 0 {
+			if *item.Deadline < 946684800000 || *item.Deadline > 4102444800000 {
+				return nil, errors.New("雨课堂课堂活动截止时间格式变化")
+			}
+			deadline := time.UnixMilli(*item.Deadline).UTC()
+			activity.Deadline = &deadline
+		}
+		if item.ProblemCount != nil && *item.ProblemCount >= 0 {
+			activity.ProblemCount = *item.ProblemCount
+		}
+		if item.TotalScore != nil {
+			if score, err := item.TotalScore.Float64(); err == nil && score >= 0 {
+				activity.TotalScore = score
+			}
+		}
+		activities = append(activities, activity)
+	}
+	return activities, nil
+}

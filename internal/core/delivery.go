@@ -56,8 +56,7 @@ func (e *Engine) ClaimStillValid(id string, now time.Time) bool {
 		if ev.Status != "sending" || !eventValid(&e.state, ev, now) {
 			return false
 		}
-		urgent := ev.Kind == "exam_start" && ev.MinutesBefore == 60 || (ev.Kind == "deadline" || ev.Kind == "video_deadline") && ev.MinutesBefore == 30
-		if IsQuiet(e.state.Settings, now) && !urgent {
+		if IsQuiet(e.state.Settings, now) && !urgentEvent(ev) {
 			return false
 		}
 		if ev.Kind == "fault" {
@@ -65,6 +64,9 @@ func (e *Engine) ClaimStillValid(id string, now time.Time) bool {
 		}
 		for _, a := range e.state.Accounts {
 			if a.Platform == ev.Platform {
+				if ev.Kind == "in_class" {
+					return !a.NeedsRevalidation
+				}
 				return !a.NeedsRevalidation && a.SyncState == "success" && a.LastSuccessAt != nil && now.Sub(*a.LastSuccessAt) <= FreshnessLimit
 			}
 		}

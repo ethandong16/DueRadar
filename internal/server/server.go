@@ -25,7 +25,7 @@ import (
 	"github.com/ethandong16/due-radar/internal/vault"
 )
 
-const Version = "0.2.2-dev"
+const Version = "0.3.0-dev"
 
 type session struct{ expires time.Time }
 type attempt struct {
@@ -66,6 +66,8 @@ type Server struct {
 	rainSyncCancel    context.CancelFunc
 	rainAssists       map[string]*rainAssist
 	rainAssistActive  *rainAssist
+	inClassMu         sync.Mutex
+	inClassStatus     inClassStatus
 	lifetime          context.Context
 	lifetimeCancel    context.CancelFunc
 	lifeMu            sync.Mutex
@@ -106,6 +108,7 @@ func (s *Server) Handler(files fs.FS) http.Handler {
 	mux.HandleFunc("GET /api/bark", s.protected(s.getBark))
 	mux.HandleFunc("PUT /api/bark", s.protected(s.setBark))
 	mux.HandleFunc("POST /api/bark/test", s.protected(s.testBark))
+	mux.HandleFunc("POST /api/in-class/test", s.protected(s.testInClass))
 	mux.HandleFunc("POST /api/accounts/rain/login", s.protected(s.startRainLogin))
 	mux.HandleFunc("POST /api/accounts/zhidao/login", s.protected(s.startZhidaoLogin))
 	mux.HandleFunc("GET /api/accounts/zhidao/login", s.protected(s.zhidaoLoginStatus))
@@ -399,7 +402,18 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if deliveryError == "" && health.UnresolvedFailures > 0 {
 		deliveryError = "有通知发送失败，请查看发送记录并检查 Bark 配置及网络"
 	}
-	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 2, "go_version": runtime.Version(), "message": "普通雨课堂和知到校内课支持扫码绑定；共享课待实测", "notification_error": deliveryError, "notification_last_attempt_at": deliveryAt, "notification_failure_count": health.UnresolvedFailures, "notification_last_success_at": health.LastSuccessAt})
+	inClass := s.inClassSnapshot()
+	settings := s.Engine.Snapshot().Settings
+	var lastCheck any
+	if !inClass.LastCheckAt.IsZero() {
+		lastCheck = inClass.LastCheckAt
+	}
+	var lastQuiz any
+	if !inClass.LastQuizAt.IsZero() {
+		lastQuiz = inClass.LastQuizAt
+	}
+	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 2, "go_version": runtime.Version(), "message": "普通雨课堂和知到校内课支持扫码绑定；共享课待实测", "notification_error": deliveryError, "notification_last_attempt_at": deliveryAt, "notification_failure_count": health.UnresolvedFailures, "notification_last_success_at": health.LastSuccessAt,
+		"in_class_enabled": settings.InClassEnabled, "in_class_poll_seconds": settings.InClassPollSeconds, "in_class_last_check_at": lastCheck, "in_class_lessons": inClass.Lessons, "in_class_last_quiz_at": lastQuiz, "in_class_last_quiz": inClass.LastQuiz, "in_class_detected": inClass.Detected, "in_class_error": inClass.Error})
 }
 
 // Sync and Deliver have separate clocks; slow polling does not postpone known deadlines.
@@ -600,6 +614,7 @@ func (s *Server) Run(ctx context.Context) {
 			}
 		}
 	})
+	s.startJob(s.runInClass)
 	<-s.lifetime.Done()
 }
 
