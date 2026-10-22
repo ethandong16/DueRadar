@@ -23,6 +23,7 @@ type Task struct {
 	SourceURL      string     `json:"source_url,omitempty"`
 	RawTime        string     `json:"raw_time,omitempty"`
 	SourceTimezone string     `json:"source_timezone,omitempty"`
+	Historical     bool       `json:"historical"`
 	LastSyncedAt   time.Time  `json:"last_synced_at"`
 }
 

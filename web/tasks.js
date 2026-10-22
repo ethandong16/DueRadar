@@ -49,7 +49,9 @@
     const { scope = "current", now = Date.now() } = options;
     if (scope === "all") return tasks.slice();
     const info = scopeInfo(tasks, now);
-    return tasks.filter((task) => !info.groups.get(courseKey(task)).historical);
+    // The server classifies the semester once for both the list and reminders;
+    // fall back to the local heuristic for snapshots that predate the flag.
+    return tasks.filter((task) => typeof task.historical === "boolean" ? !task.historical : !info.groups.get(courseKey(task)).historical);
   }
   function timeGroup(task, now) {
     const due = deadline(task);

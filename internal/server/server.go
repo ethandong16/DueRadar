@@ -25,7 +25,7 @@ import (
 	"github.com/ethandong16/due-radar/internal/vault"
 )
 
-const Version = "0.2.0-dev"
+const Version = "0.2.1-dev"
 
 type session struct{ expires time.Time }
 type attempt struct {

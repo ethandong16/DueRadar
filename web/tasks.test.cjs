@@ -49,6 +49,14 @@ test("dates outrank course names and unknown courses stay visible", () => {
   assert.ok(scopeTasks(termFixture,{now}).some(t=>t.id==="undated"));
   assert.equal(scopeTasks([{ id:"empty", platform:"rain", course:"无日期课程", status:"pending", kind:"video" }],{now}).length,1);
 });
+test("server semester flags take precedence over local heuristics", () => {
+  const flagged = [
+    { id:"server-old", platform:"rain", course:"临时课程", status:"pending", kind:"video", historical:true },
+    { id:"server-new", platform:"rain", course:"2024-2025-1旧名课程", status:"pending", kind:"video", historical:false, due_at:"2026-12-01T00:00:00+08:00" },
+  ];
+  assert.deepEqual(scopeTasks(flagged,{now}).map(t=>t.id), ["server-new"]);
+  assert.deepEqual(select(flagged,{now,kind:"video"}).map(t=>t.id), ["server-new"]);
+});
 test("academic terms roll over in September and February", () => {
   const start = (value) => semester(Date.parse(value)).start;
   assert.equal(start("2026-09-01T12:00:00+08:00"), new Date(2026,8,1).getTime());

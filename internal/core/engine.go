@@ -189,6 +189,7 @@ func (e *Engine) Sync(platform string, tasks []Task, now time.Time) error {
 		}
 	}
 	return e.change(func(s *State) error {
+		markHistorical(tasks, now, s.Settings.Timezone)
 		ai := accountIndex(s, platform)
 		previous := s.Accounts[ai]
 		recovery := previous.NeedsRevalidation || previous.LastSuccessAt != nil && now.Sub(*previous.LastSuccessAt) > FreshnessLimit
@@ -222,6 +223,10 @@ func (e *Engine) Sync(platform string, tasks []Task, now time.Time) error {
 				if taskPending(incoming, now) {
 					addEvent(s, Event{ID: eventID(platform, incoming.ID, "new_task"), TaskID: incoming.ID, Platform: platform, Kind: "new_task", Title: "新任务 · " + incoming.Title, Body: taskBody(incoming, s.Settings), DueAt: now, CreatedAt: now, Status: "pending"})
 				}
+			}
+			if incoming.Historical {
+				// Last semester keeps its history but never produces reminders.
+				invalidateTask(s, platform, incoming.ID, "task belongs to a previous semester")
 			}
 			schedule(s, incoming, now)
 		}
@@ -286,7 +291,7 @@ func (e *Engine) Fail(platform string, expired bool, message string, now time.Ti
 }
 
 func taskPending(t Task, now time.Time) bool {
-	return t.Status == "pending" && (t.EndAt == nil || t.EndAt.After(now))
+	return !t.Historical && t.Status == "pending" && (t.EndAt == nil || t.EndAt.After(now))
 }
 func timePtr(t time.Time) *time.Time { return &t }
 func sameTime(a, b *time.Time) bool {
