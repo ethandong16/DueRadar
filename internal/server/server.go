@@ -25,7 +25,7 @@ import (
 	"github.com/ethandong16/due-radar/internal/vault"
 )
 
-const Version = "0.2.1-dev"
+const Version = "0.2.2-dev"
 
 type session struct{ expires time.Time }
 type attempt struct {
@@ -51,6 +51,7 @@ type Server struct {
 	started           time.Time
 	mu                sync.Mutex
 	sessions          map[string]session
+	sessionsPath      string
 	attempts          map[string]attempt
 	syncGate          chan struct{}
 	notifyMu          sync.Mutex
@@ -241,9 +242,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, 429, "会话数量已达上限")
 		return
 	}
-	s.sessions[token] = session{now.Add(12 * time.Hour)}
+	s.sessions[sessionKey(token)] = session{now.Add(sessionLifetime)}
+	s.persistSessionsLocked()
 	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: "dueradar_session", Value: token, Path: "/", HttpOnly: true, Secure: s.SecureCookies, SameSite: http.SameSiteStrictMode, MaxAge: 43200})
+	http.SetCookie(w, &http.Cookie{Name: "dueradar_session", Value: token, Path: "/", HttpOnly: true, Secure: s.SecureCookies, SameSite: http.SameSiteStrictMode, MaxAge: int(sessionLifetime / time.Second)})
 	jsonResponse(w, 200, map[string]bool{"authenticated": true})
 }
 
@@ -255,9 +257,10 @@ func (s *Server) protected(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		s.mu.Lock()
-		v, ok := s.sessions[c.Value]
+		key := sessionKey(c.Value)
+		v, ok := s.sessions[key]
 		if ok && !v.expires.After(time.Now()) {
-			delete(s.sessions, c.Value)
+			delete(s.sessions, key)
 			ok = false
 		}
 		s.mu.Unlock()
@@ -271,7 +274,8 @@ func (s *Server) protected(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie("dueradar_session"); err == nil {
 		s.mu.Lock()
-		delete(s.sessions, c.Value)
+		delete(s.sessions, sessionKey(c.Value))
+		s.persistSessionsLocked()
 		s.mu.Unlock()
 		s.cancelRainAssistOwner(c.Value)
 	}

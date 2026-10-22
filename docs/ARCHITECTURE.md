@@ -29,7 +29,7 @@
 
 ## 管理认证与凭据
 
-管理密码来自环境变量，长度至少 12 字符；服务端恒定时间比较，不写日志。会话使用 256 位随机值、HttpOnly/SameSite=Strict Cookie，12 小时过期；进程重启后需要重新登录。HTTPS 部署显式开启 Secure Cookie。修改请求验证 Origin 与 Host，并拒绝跨站 Fetch 请求；JSON 请求体有大小限制。
+管理密码来自环境变量，长度至少 12 字符；服务端恒定时间比较，不写日志。会话使用 256 位随机值、HttpOnly/SameSite=Strict Cookie，15 天过期；会话以哈希形式保存在数据目录，进程重启后仍然有效。HTTPS 部署显式开启 Secure Cookie。修改请求验证 Origin 与 Host，并拒绝跨站 Fetch 请求；JSON 请求体有大小限制。
 
 Bark Key 和平台会话不进入任务快照和 API 响应。AES-256-GCM 密钥保存在 0600 `master.key`，密文位于 `secrets.enc`。这防止误读密文或错误导出，不抵御已获取设备账户权限的攻击者；备份时保护整个目录。会话由程序新建的官方扫码流程取得，并独立验证身份后保存。
 

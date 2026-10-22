@@ -68,6 +68,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := app.EnableSessionPersistence(*dir); err != nil {
+		log.Printf("session persistence disabled: %v", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if *demo {

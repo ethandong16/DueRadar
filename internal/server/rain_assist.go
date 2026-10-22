@@ -112,7 +112,7 @@ func (s *Server) startRainAssist(w http.ResponseWriter, r *http.Request) {
 	}
 	// Close the protected-handler/logout race before associating the flow.
 	s.mu.Lock()
-	owner, exists := s.sessions[admin.Value]
+	owner, exists := s.sessions[sessionKey(admin.Value)]
 	s.mu.Unlock()
 	if !exists || !owner.expires.After(time.Now()) {
 		fail(w, 401, "管理会话已过期，请重新登录")
