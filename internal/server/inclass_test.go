@@ -16,6 +16,7 @@ type fakeLiveRain struct {
 	fakeRainAdapter
 	lessons    func(context.Context) ([]platform.LiveLesson, error)
 	activities func(context.Context, string) ([]platform.LiveActivity, error)
+	quick      func(context.Context, string) ([]platform.LiveQuickAnswer, error)
 }
 
 func (f fakeLiveRain) LiveLessons(ctx context.Context) ([]platform.LiveLesson, error) {
@@ -30,6 +31,13 @@ func (f fakeLiveRain) LiveActivities(ctx context.Context, classroomID string) ([
 		return nil, nil
 	}
 	return f.activities(ctx, classroomID)
+}
+
+func (f fakeLiveRain) LiveQuickAnswers(ctx context.Context, lessonID string) ([]platform.LiveQuickAnswer, error) {
+	if f.quick == nil {
+		return nil, nil
+	}
+	return f.quick(ctx, lessonID)
 }
 
 func prepareInClass(t *testing.T, s *Server, live fakeLiveRain, now time.Time) *[]string {
@@ -85,6 +93,34 @@ func TestCheckInClassNotifiesNewQuizOnce(t *testing.T) {
 	s.checkInClass(context.Background())
 	if len(*sent) != 1 {
 		t.Fatalf("duplicate notification: %v", *sent)
+	}
+}
+
+func TestCheckInClassNotifiesPublishedQuickAnswer(t *testing.T) {
+	s, _ := testApp(t)
+	now := time.Now()
+	live := fakeLiveRain{
+		lessons: func(context.Context) ([]platform.LiveLesson, error) {
+			return []platform.LiveLesson{{ClassroomID: "100", LessonID: "9001", CourseName: "离散数学"}}, nil
+		},
+		activities: func(context.Context, string) ([]platform.LiveActivity, error) {
+			return nil, nil
+		},
+		quick: func(_ context.Context, lessonID string) ([]platform.LiveQuickAnswer, error) {
+			if lessonID != "9001" {
+				t.Fatalf("lessonID=%s", lessonID)
+			}
+			return []platform.LiveQuickAnswer{{ID: "qa-1", SentAt: now.Add(-2 * time.Minute)}}, nil
+		},
+	}
+	sent := prepareInClass(t, s, live, now)
+	s.checkInClass(context.Background())
+	if len(*sent) != 1 || !strings.Contains((*sent)[0], "课堂答题") {
+		t.Fatalf("sent=%v", *sent)
+	}
+	events := s.Engine.Snapshot().Events
+	if len(events) != 1 || events[0].Kind != "in_class" || events[0].Title != "课上答题 · 课堂答题" {
+		t.Fatalf("events=%+v", events)
 	}
 }
 

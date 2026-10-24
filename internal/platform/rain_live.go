@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,16 @@ type LiveActivity struct {
 	Deadline     *time.Time
 	ProblemCount int
 	TotalScore   float64
+}
+
+// LiveQuickAnswer is a real-time classroom answer prompt. It is exposed by
+// the lesson-summary API rather than the ordinary logs/learn activity feed.
+// The endpoint does not provide a title, so callers may use Title when the
+// platform starts returning one and fall back to a generic label otherwise.
+type LiveQuickAnswer struct {
+	ID     string
+	Title  string
+	SentAt time.Time
 }
 
 // Answerable reports whether the activity expects an answer from the student.
@@ -166,4 +177,82 @@ func (r *Rain) LiveActivities(ctx context.Context, classroomID string) ([]LiveAc
 		activities = append(activities, activity)
 	}
 	return activities, nil
+}
+
+// LiveQuickAnswers reads the read-only list used by the Rain Classroom
+// student lesson page for "quick answer" prompts. A prompt is represented by
+// sendTime even before the student submits anything, which is the distinction
+// from the historical activity feed used by LiveActivities.
+func (r *Rain) LiveQuickAnswers(ctx context.Context, lessonID string) ([]LiveQuickAnswer, error) {
+	if _, err := strconv.ParseUint(strings.TrimSpace(lessonID), 10, 64); err != nil {
+		return nil, errors.New("雨课堂课次标识无效")
+	}
+	q := url.Values{"lesson_id": {lessonID}, "page": {"1"}, "pageSize": {"10"}}
+	env, err := r.get(ctx, "/api/v3/lesson-summary/student/quick-answer-list?"+q.Encode())
+	if err != nil {
+		return nil, err
+	}
+	if env.Code == nil {
+		return nil, errors.New("雨课堂课堂答题响应格式变化")
+	}
+	if *env.Code != 0 {
+		if *env.Code == 50000 {
+			return nil, ErrSessionExpired
+		}
+		return nil, errors.New("雨课堂课堂答题读取失败")
+	}
+	var data struct {
+		List *[]struct {
+			ID       json.Number `json:"id"`
+			Title    string      `json:"title"`
+			SendTime json.Number `json:"sendTime"`
+		} `json:"list"`
+	}
+	if json.Unmarshal(env.Data, &data) != nil || data.List == nil {
+		return nil, errors.New("雨课堂课堂答题列表格式变化")
+	}
+	if len(*data.List) > 100 {
+		return nil, errors.New("雨课堂课堂答题数量超过上限")
+	}
+	answers := make([]LiveQuickAnswer, 0, len(*data.List))
+	seen := make(map[string]bool, len(*data.List))
+	for _, item := range *data.List {
+		sentAt, err := rainLiveTimestamp(item.SendTime)
+		if err != nil {
+			return nil, errors.New("雨课堂课堂答题时间格式变化")
+		}
+		id := strings.TrimSpace(item.ID.String())
+		if id == "" || id == "0" {
+			// The student endpoint has returned rows without id in older
+			// deployments. sendTime is still unique for a published prompt and
+			// lets the monitor remain useful without guessing an answer state.
+			id = strconv.FormatInt(sentAt.UnixMilli(), 10)
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		answers = append(answers, LiveQuickAnswer{ID: id, Title: strings.TrimSpace(item.Title), SentAt: sentAt})
+	}
+	return answers, nil
+}
+
+func rainLiveTimestamp(raw json.Number) (time.Time, error) {
+	s := strings.TrimSpace(raw.String())
+	if s == "" || s == "0" {
+		return time.Time{}, errors.New("missing timestamp")
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return time.Time{}, err
+	}
+	// The web client currently returns milliseconds; accept seconds too because
+	// the mobile endpoint used that unit in older responses.
+	if n >= 946684800 && n < 946684800000 {
+		n *= 1000
+	}
+	if n < 946684800000 || n > 4102444800000 {
+		return time.Time{}, errors.New("timestamp outside supported range")
+	}
+	return time.UnixMilli(n).UTC(), nil
 }

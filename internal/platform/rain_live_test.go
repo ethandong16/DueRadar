@@ -111,3 +111,38 @@ func TestRainLiveActivitiesErrors(t *testing.T) {
 		t.Fatal("implausible timestamp must fail")
 	}
 }
+
+func TestRainLiveQuickAnswers(t *testing.T) {
+	r := rainTestClient(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/api/v3/lesson-summary/student/quick-answer-list" {
+			t.Errorf("unexpected path %s", req.URL.Path)
+		}
+		q := req.URL.Query()
+		if q.Get("lesson_id") != "9001" || q.Get("page") != "1" || q.Get("pageSize") != "10" {
+			t.Errorf("unexpected quick-answer query %v", q)
+		}
+		fmt.Fprint(w, `{"code":0,"data":{"list":[{"id":77,"title":"","sendTime":1792663153000},{"id":78,"sendTime":"1792663163"}]}}`)
+	})
+	answers, err := r.LiveQuickAnswers(context.Background(), "9001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(answers) != 2 || answers[0].ID != "77" || answers[0].SentAt.UTC().Format(time.RFC3339) != "2026-10-22T09:59:13Z" {
+		t.Fatalf("answers=%+v", answers)
+	}
+	if answers[1].SentAt.UTC().Format(time.RFC3339) != "2026-10-22T09:59:23Z" {
+		t.Fatalf("seconds timestamp was not normalized: %+v", answers[1])
+	}
+}
+
+func TestRainLiveQuickAnswersErrors(t *testing.T) {
+	r := rainTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"code":50000,"data":""}`)
+	})
+	if _, err := r.LiveQuickAnswers(context.Background(), "9001"); !errors.Is(err, ErrSessionExpired) {
+		t.Fatalf("expired quick-answer session error=%v", err)
+	}
+	if _, err := r.LiveQuickAnswers(context.Background(), "not-a-number"); err == nil {
+		t.Fatal("invalid lesson id must fail before request")
+	}
+}

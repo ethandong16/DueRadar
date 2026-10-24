@@ -19,6 +19,10 @@ type inClassAdapter interface {
 	LiveActivities(context.Context, string) ([]platform.LiveActivity, error)
 }
 
+type inClassQuickAnswerAdapter interface {
+	LiveQuickAnswers(context.Context, string) ([]platform.LiveQuickAnswer, error)
+}
+
 // inClassNotifyWindow decides whether a newly observed activity is still worth
 // announcing. The first poll of a lesson may already see a quiz pushed a few
 // minutes earlier; anything older is recorded silently to avoid a burst of
@@ -147,7 +151,6 @@ func (s *Server) checkInClass(parent context.Context) {
 			if firstErr == "" {
 				firstErr = "读取课堂活动失败"
 			}
-			continue
 		}
 		// The newest lesson record marks when this class started; the feed is
 		// newest first, so the first type-14 entry is the current lesson.
@@ -174,6 +177,35 @@ func (s *Server) checkInClass(parent context.Context) {
 				Body:        inClassBody(lesson, activity, settings.Timezone),
 				Notify:      notify,
 			})
+		}
+		// Rain's live "quick answer" prompts are kept in the lesson-summary
+		// endpoint and do not necessarily create a logs/learn activity. Read
+		// that list as a second, read-only source when the lesson has an id.
+		if quick, ok := live.(inClassQuickAnswerAdapter); ok && lesson.LessonID != "" {
+			answers, quickErr := quick.LiveQuickAnswers(ctx, lesson.LessonID)
+			if quickErr != nil {
+				if firstErr == "" {
+					firstErr = "读取课堂答题失败"
+				}
+			} else {
+				for _, answer := range answers {
+					if answer.ID == "" || answer.SentAt.IsZero() {
+						continue
+					}
+					title := strings.TrimSpace(answer.Title)
+					if title == "" {
+						title = "课堂答题"
+					}
+					items = append(items, core.InClassQuiz{
+						ClassroomID: lesson.ClassroomID,
+						ActivityID:  "quick:" + answer.ID,
+						Course:      lesson.CourseName,
+						Title:       title,
+						Body:        inClassQuickAnswerBody(lesson),
+						Notify:      !answer.SentAt.Before(threshold) && !answer.SentAt.After(now.Add(time.Minute)),
+					})
+				}
+			}
 		}
 	}
 	added, err := s.Engine.ReportInClass(core.PlatformRain, items, now)
@@ -202,6 +234,16 @@ func (s *Server) checkInClass(parent context.Context) {
 		s.Deliver(deliverCtx)
 		cancel()
 	}
+}
+
+func inClassQuickAnswerBody(lesson platform.LiveLesson) string {
+	parts := []string{lesson.CourseName}
+	if lesson.ClassroomName != "" && lesson.ClassroomName != lesson.CourseName {
+		parts[0] = lesson.CourseName + " · " + lesson.ClassroomName
+	}
+	parts = append(parts, "课堂发布了新的答题")
+	parts = append(parts, "打开雨课堂立即作答")
+	return strings.Join(parts, "\n")
 }
 
 func latestQuizTitle(items []core.InClassQuiz) string {
