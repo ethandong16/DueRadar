@@ -25,7 +25,7 @@ import (
 	"github.com/ethandong16/due-radar/internal/vault"
 )
 
-const Version = "0.3.0-dev"
+const Version = "0.3.1-dev"
 
 type session struct{ expires time.Time }
 type attempt struct {
@@ -142,7 +142,7 @@ func (s *Server) Handler(files fs.FS) http.Handler {
 		jsonResponse(w, 202, map[string]string{"message": "同步已开始，请稍后查看平台结果"})
 	}))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "接口不存在") })
-	mux.Handle("/", http.FileServer(http.FS(files)))
+	mux.Handle("/", staticHandler(files))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")

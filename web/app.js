@@ -127,9 +127,10 @@
     } finally { clearTimeout(timeout); }
   }
   async function busy(button, action) {
+    button.dataset.busy = "true";
     button.disabled = true;
     try { await action(); } catch (error) { if (error.name !== "StaleSessionError") notify(error.message || "操作失败，请稍后重试。", true); }
-    finally { button.disabled = false; }
+    finally { delete button.dataset.busy; button.disabled = false; }
   }
   function changeView(view, updateHash = true) {
     if (!Object.hasOwn(viewNames, view)) view = "tasks";
@@ -271,7 +272,7 @@
       card.append(node("p", "platform-message", platform.message || "待验证"));
       card.append(node("p", "platform-date", `最近成功同步：${timestamp(platform.last_success) ? formatDate(platform.last_success) : "尚无成功记录"}`));
       if (Number(platform.failures) > 0) card.append(node("p", "platform-date", `连续失败：${Number(platform.failures)} 轮`));
-      if (["rain", "zhidao_campus"].includes(platform.id) && platform.ready && !state.demo) {
+      if (["rain", "zhidao_campus"].includes(platform.id) && platform.ready && state.runtime && !state.demo) {
         const bind = node("button", "button primary", platform.login_status === "logged_in" ? "重新扫码绑定" : (platform.id === "rain" ? "微信扫码绑定" : "知到 APP 扫码绑定"));
         bind.type = "button"; bind.addEventListener("click", () => busy(bind, () => openRainLogin(platform.id))); card.append(bind);
         if (platform.id === "rain") {
@@ -442,18 +443,24 @@
     if (ids.has(selectedPlatform)) $("platform-filter").value = selectedPlatform;
     $("demo-banner").hidden = !state.demo;
     const settings = state.settings || defaults;
-    $("quiet-title").textContent = settings.quiet_enabled ? "静默时段已开启" : "静默时段已关闭";
-    $("quiet-summary").textContent = settings.quiet_enabled ? `${settings.quiet_start}—${settings.quiet_end}，普通提醒延后。时区：${settings.timezone}。` : `所有提醒按配置时间发送。时区：${settings.timezone}。`;
-    if (!settingsDirty) populateSettings(settings);
+    $("quiet-title").textContent = !state.settings ? "提醒设置尚未加载" : settings.quiet_enabled ? "静默时段已开启" : "静默时段已关闭";
+    $("quiet-summary").textContent = !state.settings ? "任务已显示，正在读取提醒设置。" : settings.quiet_enabled ? `${settings.quiet_start}—${settings.quiet_end}，普通提醒延后。时区：${settings.timezone}。` : `所有提醒按配置时间发送。时区：${settings.timezone}。`;
+    if (state.settings && !settingsDirty) populateSettings(settings);
+    $("settings-form").querySelectorAll("input, select").forEach(input => { input.disabled = !state.settings || !state.runtime; });
+    const settingsButton = $("settings-form").querySelector("button[type=submit]");
+    settingsButton.disabled = !state.settings || !state.runtime || settingsButton.dataset.busy === "true";
+    $("settings-defaults").disabled = !state.settings || !state.runtime;
     const barkConfigured = Boolean(state.bark?.configured);
-    $("bark-status").textContent = barkConfigured ? "已配置" : "未配置";
+    $("bark-status").textContent = !state.bark ? "尚未加载" : barkConfigured ? "已配置" : "未配置";
     $("bark-status").className = `badge ${barkConfigured ? "success" : "neutral"}`;
-    $("bark-test").disabled = !barkConfigured || state.demo;
-    $("in-class-test").disabled = !barkConfigured || state.demo;
-    $("bark-form").querySelector("button[type=submit]").disabled = state.demo;
-    $("bark-key").disabled = state.demo;
-    $("bark-server").disabled = state.demo;
-    if (!barkDirty) $("bark-server").value = state.bark?.server || "https://api.day.app";
+    const barkUnavailable = !state.bark || !state.runtime || state.demo;
+    $("bark-test").disabled = !barkConfigured || barkUnavailable;
+    $("in-class-test").disabled = !barkConfigured || barkUnavailable;
+    const barkButton = $("bark-form").querySelector("button[type=submit]");
+    barkButton.disabled = barkUnavailable || barkButton.dataset.busy === "true";
+    $("bark-key").disabled = barkUnavailable;
+    $("bark-server").disabled = barkUnavailable;
+    if (state.bark && !barkDirty) $("bark-server").value = state.bark.server || "https://api.day.app";
     $("bark-key").placeholder = barkConfigured ? "已保存，留空保留当前密钥" : "输入 Bark 设备密钥";
     $("runtime-grid").replaceChildren();
     const runtime = state.runtime || {};
@@ -463,7 +470,7 @@
     const inClassLessons = Array.isArray(runtime.in_class_lessons) ? runtime.in_class_lessons : [];
     const inClassState = !inClassOn ? "已关闭" : runtime.in_class_error ? runtime.in_class_error : inClassLessons.length ? `正在上课 · ${inClassLessons.join("、")}` : runtime.in_class_last_check_at ? `守候中 · ${formatDate(runtime.in_class_last_check_at, true)}` : "等待首次检查";
     const inClassRecent = runtime.in_class_last_quiz_at ? `${runtime.in_class_last_quiz || "课上答题"} · ${formatDate(runtime.in_class_last_quiz_at, true)}` : "暂无检测记录";
-    const readouts = [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["课上答题监测", inClassState], ["最近课上答题", inClassRecent], ["通知运行状态", runtime.notification_error || "正常"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"]];
+    const readouts = [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["课上答题监测", state.runtime ? inClassState : "尚未加载"], ["最近课上答题", state.runtime ? inClassRecent : "尚未加载"], ["通知运行状态", state.runtime ? runtime.notification_error || "正常" : "尚未加载"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"]];
     readouts.forEach(([label, value], index) => {
       const card = node("article", "runtime-card");
       if (index === readouts.length - 1) card.classList.add("runtime-card--wide");
@@ -488,6 +495,12 @@
     }
     const job = { generation, queued: false, showSuccess, promise: null };
     refreshJob = job;
+    const showError = (error) => {
+      if (generation !== authGeneration || error.name === "StaleSessionError" || job.queued) return;
+      $("boot").hidden = true;
+      if (!authenticated) { showLogin(); if (!String(error.message).includes("401") && !/unauthorized|未登录|认证|登录/i.test(error.message)) $("login-error").textContent = `连接服务失败：${error.message}`; }
+      else { $("connection-error").textContent = `状态刷新失败：${error.message}。当前显示上次成功读取的数据。`; $("connection-error").hidden = false; $("service-label").textContent = "连接暂时中断"; $("service-dot").classList.add("offline"); }
+    };
     job.promise = (async () => {
       try {
         do {
@@ -497,21 +510,52 @@
             // this pass, so a save never joins a snapshot taken before its write.
             await api("/api/session");
             if (generation !== authGeneration) return false;
-            const [tasks, events, accounts, settings, bark, runtime] = await Promise.all([api("/api/tasks"), api("/api/events"), api("/api/accounts"), api("/api/settings"), api("/api/bark"), api("/api/status")]);
+            const snapshot = { tasks: [], events: [], platforms: [], settings: null, bark: null, runtime: null, demo: false, ...state };
+            const sections = { tasks: "任务", events: "通知记录", accounts: "平台账号", settings: "提醒设置", bark: "Bark 配置", status: "运行状态" };
+            const pending = new Set(Object.keys(sections));
+            const errors = new Map();
+            let tasksReady = false;
+            const publish = () => {
+              if (generation !== authGeneration || job.queued || !tasksReady) return;
+              state = { ...snapshot };
+              authenticated = true;
+              $("boot").hidden = true; $("login-screen").hidden = true; $("app").hidden = false;
+              const messages = [...errors].map(([key, error]) => `${sections[key]}加载失败：${error.message}。该部分保留上次数据（如有）。`);
+              if (pending.size) messages.push(`正在加载：${[...pending].map(key => sections[key]).join("、")}。`);
+              $("connection-error").textContent = messages.join(" ");
+              $("connection-error").hidden = messages.length === 0;
+              $("service-label").textContent = errors.size ? "部分信息加载失败" : "管理服务已连接";
+              $("service-dot").classList.toggle("offline", errors.size > 0);
+              render();
+            };
+            // Publish tasks as soon as authenticated reads succeed. Handle each
+            // rejection locally so the refresh gate survives partial failures
+            // until every request settles, including queued mutation refreshes.
+            await Promise.all(Object.keys(sections).map(async (key) => {
+              try {
+                const value = await api(`/api/${key}`);
+                if (generation !== authGeneration) return;
+                if (key === "tasks") {
+                  snapshot.tasks = (Array.isArray(value) ? value : []).map(task => ({ ...task, due_at: task.end_at, last_seen_at: task.last_synced_at }));
+                  tasksReady = true;
+                } else if (key === "accounts") snapshot.platforms = (Array.isArray(value) ? value : []).map(account => ({ ...account, id: account.platform, login_status: account.login_state, sync_status: account.sync_state, last_success: account.last_success_at, failures: account.consecutive_failures, message: account.last_error || account.message }));
+                else if (key === "events") snapshot.events = Array.isArray(value) ? value : [];
+                else if (key === "status") { snapshot.runtime = value; snapshot.demo = Boolean(value.demo); }
+                else snapshot[key] = value;
+              } catch (error) {
+                if (generation !== authGeneration || error.name === "StaleSessionError") return;
+                errors.set(key, error);
+                if (key === "tasks") showError(error);
+              } finally { pending.delete(key); }
+              publish();
+            }));
             if (generation !== authGeneration) return false;
             if (job.queued) continue;
-            state = { tasks: (Array.isArray(tasks) ? tasks : []).map((task) => ({ ...task, due_at: task.end_at, last_seen_at: task.last_synced_at })), events: Array.isArray(events) ? events : [], platforms: (Array.isArray(accounts) ? accounts : []).map((account) => ({ ...account, id: account.platform, login_status: account.login_state, sync_status: account.sync_state, last_success: account.last_success_at, failures: account.consecutive_failures, message: account.last_error || account.message })), settings, bark, runtime, demo: Boolean(runtime.demo) };
-            authenticated = true;
-            $("boot").hidden = true; $("login-screen").hidden = true; $("app").hidden = false;
-            $("connection-error").hidden = true;
-            $("service-label").textContent = "管理服务已连接"; $("service-dot").classList.remove("offline");
-            render();
+            if (errors.size) return false;
           } catch (error) {
             if (generation !== authGeneration || error.name === "StaleSessionError") return false;
             if (job.queued) continue;
-            $("boot").hidden = true;
-            if (!authenticated) { showLogin(); if (!String(error.message).includes("401") && !/unauthorized|未登录|认证|登录/i.test(error.message)) $("login-error").textContent = `连接服务失败：${error.message}`; }
-            else { $("connection-error").textContent = `状态刷新失败：${error.message}。当前显示上次成功读取的数据。`; $("connection-error").hidden = false; $("service-label").textContent = "连接暂时中断"; $("service-dot").classList.add("offline"); }
+            showError(error);
             return false;
           }
         } while (job.queued);
@@ -549,6 +593,7 @@
   $("sync").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/sync", "POST"); if (await refreshState()) notify(result.message || "已开始同步。"); }));
   $("bark-form").addEventListener("submit", (event) => {
     event.preventDefault(); busy(event.submitter || $("bark-form").querySelector("button"), async () => {
+      if (!state?.bark || !state?.runtime || state.demo) throw new Error("请等待 Bark 配置及运行状态加载完成后再保存。");
       const server = $("bark-server").value.trim(); const key = $("bark-key").value.trim();
       if (!key && !state.bark?.configured) throw new Error("首次配置需要填写 Bark 设备密钥。");
       if (!key && state.bark?.configured && server !== state.bark.server) throw new Error("修改 Bark 服务地址时，请重新填写设备密钥。");
@@ -560,6 +605,7 @@
   $("settings-defaults").addEventListener("click", () => { populateSettings(defaults); settingsDirty = true; notify("已填入默认值，保存后生效。"); });
   $("settings-form").addEventListener("submit", (event) => {
     event.preventDefault(); busy(event.submitter || $("settings-form").querySelector("button"), async () => {
+      if (!state?.settings || !state?.runtime) throw new Error("请等待提醒设置及运行状态加载完成后再保存。");
       const pollSeconds = Number.parseInt($("in-class-poll").value, 10);
       if (!Number.isInteger(pollSeconds) || pollSeconds < 10 || pollSeconds > 300) throw new Error("课上答题检查间隔请填写 10—300 秒。");
       const settings = { deadline_minutes: parseMinutes("deadline-minutes", "截止提醒"), exam_start_minutes: parseMinutes("exam-minutes", "考试开始"), video_minutes: parseMinutes("video-minutes", "视频截止"), quiet_enabled: $("quiet-enabled").checked, quiet_start: $("quiet-start").value, quiet_end: $("quiet-end").value, timezone: $("timezone").value.trim(), in_class_enabled: $("in-class-enabled").checked, in_class_poll_seconds: pollSeconds };

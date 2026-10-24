@@ -17,7 +17,7 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(setImme
 
 // Run the complete application with real event handlers and controlled HTTP
 // completion order. No implementation functions are exported or replaced.
-function browser() {
+function browser(intercept = null) {
   const elements = new Map();
   function element(tag = "div") {
     return {
@@ -31,6 +31,7 @@ function browser() {
       setAttribute(name, value) { this[name] = value; },
       removeAttribute(name) { delete this[name]; },
       querySelector() { return this.button ||= element("button"); },
+      querySelectorAll() { return this.inputs || []; },
       showModal() { this.open = true; },
       close() { this.open = false; if (page.deferClose) page.closeEvents.push(() => this.emit("close")); else return this.emit("close"); },
       focus() {}, scrollIntoView() {},
@@ -41,6 +42,7 @@ function browser() {
     return elements.get(id);
   }
   for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all";
+  $("settings-form").inputs = ["deadline-minutes", "exam-minutes", "video-minutes", "quiet-enabled", "quiet-start", "quiet-end", "timezone", "in-class-enabled", "in-class-poll"].map($);
   let interval;
   let loggedIn = true;
   const calls = [];
@@ -48,7 +50,7 @@ function browser() {
   let nextTimer = 0;
   const document = { hidden: false, getElementById: $, createElement: element, createDocumentFragment: element, querySelectorAll: () => [], listeners: {}, addEventListener(name, fn) { this.listeners[name] = fn; } };
   const page = {
-    $, calls, document, intercept: null, deferClose: false, closeEvents: [],
+    $, calls, document, intercept, deferClose: false, closeEvents: [],
     settings: { deadline_minutes: [1440, 180, 30], exam_start_minutes: [1440, 60], video_minutes: [4320, 1440, 180], quiet_enabled: true, quiet_start: "23:00", quiet_end: "08:00", timezone: "Asia/Shanghai" },
     click: (id) => $(id).emit("click"),
     submit: (id) => $(id).emit("submit", { submitter: $(id).querySelector("button") }),
@@ -241,4 +243,93 @@ test("a queued old close event cannot cancel a replacement QR creation", async (
   assert.equal(page.calls.length, requests, "old close event must not cancel a replacement login");
   assert.equal(page.$("rain-dialog").open, true);
   assert.equal(page.$("rain-qr").src, "new-session-qr");
+});
+
+const fixtureTasks = [{ id: "performance-fixture", platform: "rain", title: "优先显示的测试任务", kind: "homework", status: "pending" }];
+function visibleText(element) { return [element.textContent, ...element.children.map(visibleText)].join(" "); }
+
+for (const slowPath of ["/api/events", "/api/accounts", "/api/settings", "/api/bark", "/api/status"]) {
+  test(`tasks appear while ${slowPath} is still pending`, async () => {
+    const slow = deferred();
+    const page = browser(({ url }) => url === slowPath ? slow.promise : url === "/api/tasks" ? response(fixtureTasks) : null);
+    await settle();
+    assert.equal(page.$("app").hidden, false, "authenticated task list must not wait for auxiliary reads");
+    assert.match(visibleText(page.$("task-list")), /优先显示的测试任务/);
+    assert.equal(page.$("connection-error").hidden, false, "pending sections must be visible");
+    if (slowPath === "/api/settings" || slowPath === "/api/status") assert.equal(page.$("settings-form").querySelector("button").disabled, true);
+    if (slowPath === "/api/bark" || slowPath === "/api/status") assert.equal(page.$("bark-form").querySelector("button").disabled, true);
+    slow.reject(new Error("auxiliary fixture failure"));
+    await settle();
+    assert.equal(page.$("app").hidden, false);
+    assert.match(visibleText(page.$("task-list")), /优先显示的测试任务/);
+    assert.equal(page.$("connection-error").hidden, false);
+    assert.match(page.$("connection-error").textContent, /auxiliary fixture failure/);
+  });
+}
+
+test("unknown authentication never fetches or reveals tasks", async () => {
+  const session = deferred();
+  const page = browser(({ url }) => url === "/api/session" ? session.promise : response(fixtureTasks));
+  await settle();
+  assert.equal(page.$("app").hidden, true);
+  assert.deepEqual(page.calls.map(call => call.url), ["/api/session"]);
+  session.resolve(response({ error: "session expired" }, 401));
+  await settle();
+  assert.equal(page.$("app").hidden, true);
+  assert.equal(page.$("login-screen").hidden, false);
+  assert.deepEqual(page.calls.map(call => call.url), ["/api/session"]);
+});
+
+for (const path of ["/api/tasks", "/api/settings"]) {
+  test(`current ${path} 401 hides the application and ignores later reads`, async () => {
+    const denied = deferred(), other = deferred();
+    const page = browser(({ url }) => url === path ? denied.promise : url === "/api/bark" ? other.promise : url === "/api/tasks" ? response(fixtureTasks) : null);
+    await settle();
+    denied.resolve(response({ error: "session expired" }, 401));
+    await settle();
+    assert.equal(page.$("app").hidden, true);
+    assert.equal(page.$("login-screen").hidden, false);
+    other.resolve(response({ configured: true, server: "fixture" }));
+    await settle();
+    assert.equal(page.$("app").hidden, true);
+  });
+}
+
+test("an auxiliary failure does not release the refresh gate while another read is pending", async () => {
+  const slow = deferred();
+  let hold = true;
+  const page = browser(({ url }) => hold && url === "/api/bark" ? slow.promise : hold && url === "/api/settings" ? response({ error: "settings fixture failure" }, 500) : null);
+  await settle();
+  const refresh = page.click("refresh");
+  page.tick();
+  page.document.listeners.visibilitychange();
+  await settle();
+  assert.equal(page.calls.filter(call => call.url === "/api/session").length, 1, "no overlapping refresh after a partial failure");
+  hold = false;
+  slow.resolve(response({ configured: true }));
+  await refresh;
+  await settle();
+  assert.equal(page.calls.filter(call => call.url === "/api/session").length, 2, "all queued callers share one subsequent refresh");
+  assert.equal(page.$("connection-error").hidden, true, "successful retry clears partial failure");
+});
+
+test("a critical task failure is visible without presenting an empty successful list", async () => {
+  const page = browser(({ url }) => url === "/api/tasks" ? response({ error: "tasks fixture failure" }, 500) : null);
+  await settle();
+  assert.equal(page.$("app").hidden, true);
+  assert.match(page.$("login-error").textContent, /tasks fixture failure/);
+});
+
+test("settings inputs stay disabled until their saved values arrive", async () => {
+  const settings = deferred();
+  const page = browser(({ url }) => url === "/api/settings" && settings.promise);
+  await settle();
+  assert.equal(page.$("app").hidden, false);
+  assert.equal(page.$("deadline-minutes").disabled, true, "unloaded settings must not become an editable empty draft");
+  assert.equal(page.$("timezone").disabled, true);
+  settings.resolve(response(page.settings));
+  await settle();
+  assert.equal(page.$("deadline-minutes").disabled, false);
+  assert.equal(page.$("deadline-minutes").value, "1440, 180, 30");
+  assert.equal(page.$("timezone").value, "Asia/Shanghai");
 });
