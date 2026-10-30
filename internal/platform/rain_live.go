@@ -17,6 +17,16 @@ type LiveLesson struct {
 	LessonID      string
 	CourseName    string
 	ClassroomName string
+	Role          int
+}
+
+// IsStudent reports whether the signed-in user attends the classroom as a
+// student. Rain Classroom uses role 1 for the teacher and 2 for teaching
+// assistants; the student quick-answer endpoint is not available to those
+// roles and answers with HTTP 500. An absent role is treated as a student so
+// older responses keep working.
+func (l LiveLesson) IsStudent() bool {
+	return l.Role != 1 && l.Role != 2
 }
 
 // LiveActivity is one entry of the classroom activity feed. Only the fields the
@@ -72,6 +82,7 @@ func (r *Rain) LiveLessons(ctx context.Context) ([]LiveLesson, error) {
 			LessonID      json.Number `json:"lessonId"`
 			CourseName    string      `json:"courseName"`
 			ClassroomName string      `json:"classroomName"`
+			Role          json.Number `json:"role"`
 		} `json:"onLessonClassrooms"`
 	}
 	if json.Unmarshal(env.Data, &data) != nil || data.Lessons == nil {
@@ -91,7 +102,11 @@ func (r *Rain) LiveLessons(ctx context.Context) ([]LiveLesson, error) {
 			continue
 		}
 		seen[classroomID] = true
-		lesson := LiveLesson{ClassroomID: classroomID, CourseName: strings.TrimSpace(item.CourseName), ClassroomName: strings.TrimSpace(item.ClassroomName)}
+		role := 0
+		if n, err := item.Role.Int64(); err == nil && n >= 0 && n <= 100 {
+			role = int(n)
+		}
+		lesson := LiveLesson{ClassroomID: classroomID, CourseName: strings.TrimSpace(item.CourseName), ClassroomName: strings.TrimSpace(item.ClassroomName), Role: role}
 		if rainPositiveID(item.LessonID) {
 			lesson.LessonID = item.LessonID.String()
 		}

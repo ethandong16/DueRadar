@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ func TestCheckInClassNotifiesPublishedQuickAnswer(t *testing.T) {
 	now := time.Now()
 	live := fakeLiveRain{
 		lessons: func(context.Context) ([]platform.LiveLesson, error) {
-			return []platform.LiveLesson{{ClassroomID: "100", LessonID: "9001", CourseName: "离散数学"}}, nil
+			return []platform.LiveLesson{{ClassroomID: "100", LessonID: "9001", CourseName: "离散数学", Role: 5}}, nil
 		},
 		activities: func(context.Context, string) ([]platform.LiveActivity, error) {
 			return nil, nil
@@ -121,6 +122,36 @@ func TestCheckInClassNotifiesPublishedQuickAnswer(t *testing.T) {
 	events := s.Engine.Snapshot().Events
 	if len(events) != 1 || events[0].Kind != "in_class" || events[0].Title != "课上答题 · 课堂答题" {
 		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestCheckInClassSkipsQuickAnswersForTeacherLessons(t *testing.T) {
+	for _, role := range []int{1, 2} {
+		t.Run(fmt.Sprintf("role-%d", role), func(t *testing.T) {
+			s, _ := testApp(t)
+			now := time.Now()
+			queried := false
+			live := fakeLiveRain{
+				lessons: func(context.Context) ([]platform.LiveLesson, error) {
+					return []platform.LiveLesson{{ClassroomID: "200", LessonID: "9002", CourseName: "Test", Role: role}}, nil
+				},
+				activities: func(context.Context, string) ([]platform.LiveActivity, error) {
+					return nil, nil
+				},
+				quick: func(context.Context, string) ([]platform.LiveQuickAnswer, error) {
+					queried = true
+					return nil, errors.New("雨课堂 HTTP 状态 500")
+				},
+			}
+			prepareInClass(t, s, live, now)
+			s.checkInClass(context.Background())
+			if queried {
+				t.Fatal("teacher or assistant classroom must not call the student quick-answer endpoint")
+			}
+			if status := s.inClassSnapshot(); status.Error != "" {
+				t.Fatalf("teacher or assistant classroom must not surface a read error: %+v", status)
+			}
+		})
 	}
 }
 

@@ -17,7 +17,7 @@ func TestRainLiveLessons(t *testing.T) {
 		if req.Header.Get("Cookie") != "sessionid=test-only-session" {
 			t.Error("in-class check must be authenticated")
 		}
-		fmt.Fprint(w, `{"code":0,"msg":"OK","data":{"onLessonClassrooms":[{"classroomId":"100","classroomName":"A-01","courseName":"离散数学","lessonId":"9001","role":5},{"classroomId":101,"classroomName":"B-02","courseName":"","lessonId":"9002"}]}}`)
+		fmt.Fprint(w, `{"code":0,"msg":"OK","data":{"onLessonClassrooms":[{"classroomId":"100","classroomName":"A-01","courseName":"离散数学","lessonId":"9001","role":5},{"classroomId":101,"classroomName":"B-02","courseName":"","lessonId":"9002","role":"1"}]}}`)
 	})
 	lessons, err := r.LiveLessons(context.Background())
 	if err != nil {
@@ -26,10 +26,10 @@ func TestRainLiveLessons(t *testing.T) {
 	if len(lessons) != 2 {
 		t.Fatalf("lessons=%d", len(lessons))
 	}
-	if lessons[0].ClassroomID != "100" || lessons[0].LessonID != "9001" || lessons[0].CourseName != "离散数学" {
+	if lessons[0].ClassroomID != "100" || lessons[0].LessonID != "9001" || lessons[0].CourseName != "离散数学" || lessons[0].Role != 5 || !lessons[0].IsStudent() {
 		t.Fatalf("unexpected lesson %+v", lessons[0])
 	}
-	if lessons[1].ClassroomID != "101" || lessons[1].CourseName != "B-02" {
+	if lessons[1].ClassroomID != "101" || lessons[1].CourseName != "B-02" || lessons[1].Role != 1 || lessons[1].IsStudent() {
 		t.Fatalf("classroom name must fall back to the course name: %+v", lessons[1])
 	}
 }
@@ -52,6 +52,22 @@ func TestRainLiveLessonsErrors(t *testing.T) {
 				t.Fatalf("LiveLessons() error=%v want expired=%v", err, tc.expired)
 			}
 		})
+	}
+}
+
+func TestLiveLessonIsStudent(t *testing.T) {
+	for _, tc := range []struct {
+		role    int
+		student bool
+	}{
+		{0, true},
+		{1, false},
+		{2, false},
+		{5, true},
+	} {
+		if got := (LiveLesson{Role: tc.role}).IsStudent(); got != tc.student {
+			t.Errorf("role %d: IsStudent()=%t want %t", tc.role, got, tc.student)
+		}
 	}
 }
 

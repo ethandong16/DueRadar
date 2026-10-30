@@ -181,7 +181,9 @@ func (s *Server) checkInClass(parent context.Context) {
 		// Rain's live "quick answer" prompts are kept in the lesson-summary
 		// endpoint and do not necessarily create a logs/learn activity. Read
 		// that list as a second, read-only source when the lesson has an id.
-		if quick, ok := live.(inClassQuickAnswerAdapter); ok && lesson.LessonID != "" {
+		// Teacher and assistant classrooms expose the activity feed but reject
+		// the student quick-answer endpoint, so only student lessons are read.
+		if quick, ok := live.(inClassQuickAnswerAdapter); ok && lesson.LessonID != "" && lesson.IsStudent() {
 			answers, quickErr := quick.LiveQuickAnswers(ctx, lesson.LessonID)
 			if quickErr != nil {
 				if firstErr == "" {
