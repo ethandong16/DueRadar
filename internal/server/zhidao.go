@@ -73,6 +73,9 @@ func (s *Server) startZhidaoLogin(w http.ResponseWriter, r *http.Request) {
 		_ = s.Engine.SetAccount(core.Account{Platform: core.PlatformZhidaoCampus, LoginState: "failed", LastError: s.zhidaoError})
 		s.zhidaoMu.Unlock()
 		loginCancel()
+		// The stored binding was never replaced. Revalidate it now instead of
+		// leaving every reminder suppressed until the next scheduled sync.
+		s.queueSync()
 		fail(w, 502, "二维码创建失败，请重试")
 		return
 	}
@@ -106,17 +109,24 @@ func (s *Server) startZhidaoLogin(w http.ResponseWriter, r *http.Request) {
 			s.zhidaoState, s.zhidaoError = "failed", "扫码登录未完成，请重试"
 			_ = s.Engine.SetAccount(core.Account{Platform: core.PlatformZhidaoCampus, LoginState: "failed", LastError: s.zhidaoError})
 			s.zhidaoMu.Unlock()
+			// The previous stored session is untouched; verify whether it still
+			// works so a failed rebind does not pause delivery for a full cycle.
+			s.queueSync()
 			return
 		}
 		if err = s.Vault.Update(func(c *vault.Config) error { c.ZhidaoSession = cookie; return nil }); err != nil {
 			s.zhidaoState, s.zhidaoError = "failed", "会话保存失败"
 			_ = s.Engine.SetAccount(core.Account{Platform: core.PlatformZhidaoCampus, LoginState: "failed", LastError: s.zhidaoError})
 			s.zhidaoMu.Unlock()
+			s.queueSync()
 			return
 		}
 		if err = s.Engine.SetAccount(core.Account{Platform: core.PlatformZhidaoCampus, LoginState: "logged_in"}); err != nil {
 			s.zhidaoState, s.zhidaoError = "failed", "登录状态保存失败"
 			s.zhidaoMu.Unlock()
+			// The new session may already be in the vault; a sync will validate
+			// it or record the failure.
+			s.queueSync()
 			return
 		}
 		s.zhidaoState, s.zhidaoError = "logged_in", ""

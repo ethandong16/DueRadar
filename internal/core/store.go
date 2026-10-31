@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -52,21 +53,31 @@ func Open(path string) (*Engine, error) {
 	if e.state.Version != 1 {
 		return nil, errors.New("unsupported state version")
 	}
-	// In-class monitoring arrived after the first state format. A missing poll
-	// interval marks an older file, which is migrated once to the new defaults.
+	// Windows denies replacing a file while this read handle remains open, so
+	// close it before the one-time migration write below. The deferred Close
+	// still covers every earlier error return and is harmless after this point.
+	if err = f.Close(); err != nil {
+		return nil, fmt.Errorf("close state: %w", err)
+	}
+	// Settings gained fields after the first state format. A missing poll
+	// interval or timezone marks an older file, which is migrated once.
+	migrate := false
 	if e.state.Settings.InClassPollSeconds == 0 {
 		e.state.Settings.InClassEnabled = true
 		e.state.Settings.InClassPollSeconds = DefaultInClassPollSeconds
+		migrate = true
+	}
+	if strings.TrimSpace(e.state.Settings.Timezone) == "" {
+		e.state.Settings.Timezone = "Asia/Shanghai"
+		migrate = true
+	}
+	if migrate {
 		if err = e.save(e.state); err != nil {
 			return nil, fmt.Errorf("migrate state: %w", err)
 		}
 	}
 	if err = ValidateSettings(e.state.Settings); err != nil {
 		return nil, fmt.Errorf("invalid stored settings: %w", err)
-	}
-	// Windows denies replacing a file while this read handle remains open.
-	if err = f.Close(); err != nil {
-		return nil, fmt.Errorf("close state: %w", err)
 	}
 	if err = e.RequireRevalidation(); err != nil {
 		return nil, err

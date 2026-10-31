@@ -1,6 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { select, paginate, safeSource, timeGroup, semester, scopeTasks } = require("./tasks.js");
+const { select, paginate, safeSource, timeGroup, semester, scopeTasks, ageLabel, leadLabel, nextReminder, parseTime, deadline } = require("./tasks.js");
 const now = Date.parse("2026-10-22T10:00:00+08:00");
 const fixture = [
   { id:"old", status:"pending", kind:"homework", platform:"rain", title:"Old work", due_at:"2026-09-01T00:00:00+08:00" },
@@ -25,6 +25,37 @@ test("paging covers all tasks once and clamps after a shrinking snapshot", () =>
   assert.equal(new Set(ids).size,173);
   assert.equal(paginate(tasks.slice(0,8),6).page,1);
   assert.deepEqual(paginate([],9),{page:1,pages:1,total:0,start:0,end:0,items:[]});
+});
+test("Go nanosecond timestamps parse in browsers that accept milliseconds only", () => {
+  assert.equal(parseTime("2026-11-02T02:22:52.4902583+08:00"), Date.parse("2026-11-02T02:22:52.490+08:00"));
+  assert.equal(parseTime("2026-11-02T02:22:52.4902583Z"), Date.parse("2026-11-02T02:22:52.490Z"));
+  assert.equal(deadline({ due_at: "2026-11-02T02:22:52.4902583+08:00" }), Date.parse("2026-11-02T02:22:52.490+08:00"));
+  assert.equal(parseTime("2026-11-02T02:22:52.49Z"), Date.parse("2026-11-02T02:22:52.49Z"));
+  assert.ok(Number.isNaN(parseTime(null)));
+});
+test("sync freshness and reminder leads use readable units", () => {
+  assert.equal(ageLabel(now - 20 * 1000, now), "刚刚");
+  assert.equal(ageLabel(now - 5 * 60000, now), "5 分钟前");
+  assert.equal(ageLabel(now - 3 * 3600000, now), "3 小时前");
+  assert.equal(ageLabel(new Date(now - 2 * 86400000), now), "2 天前");
+  assert.equal(ageLabel("invalid", now), null);
+  assert.equal(leadLabel(1440), "1 天");
+  assert.equal(leadLabel(4320), "3 天");
+  assert.equal(leadLabel(180), "3 小时");
+  assert.equal(leadLabel(30), "30 分钟");
+  assert.equal(leadLabel(0), "");
+});
+test("the overview previews the earliest queued scheduled reminder only", () => {
+  const events = [
+    { task_id: "t1", kind: "new_task", status: "pending", due_at: "2026-10-22T09:55:00+08:00" },
+    { task_id: "t1", kind: "deadline", status: "sent", due_at: "2026-10-22T09:56:00+08:00", minutes_before: 1440 },
+    { task_id: "t1", kind: "deadline", status: "pending", due_at: "2026-10-23T09:56:00+08:00", minutes_before: 180 },
+    { task_id: "t1", kind: "exam_start", status: "sending", due_at: "2026-10-23T09:00:00+08:00", minutes_before: 60 },
+    { task_id: "t2", kind: "deadline", status: "pending", due_at: "2026-10-22T09:00:00+08:00", minutes_before: 30 },
+  ];
+  assert.deepEqual(nextReminder(events, "t1"), { at: Date.parse("2026-10-23T09:00:00+08:00"), minutes: 60, kind: "exam_start" });
+  assert.equal(nextReminder(events, "missing"), null);
+  assert.equal(nextReminder(null, "t1"), null);
 });
 test("task links allow HTTPS and reject script, file and credential URLs", () => {
   assert.equal(safeSource("https://www.yuketang.cn/v2/web/index"),"https://www.yuketang.cn/v2/web/index");

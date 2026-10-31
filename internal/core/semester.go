@@ -59,7 +59,11 @@ func markHistorical(tasks []Task, now time.Time, timezone string) {
 		}
 		if end := tasks[i].EndAt; end != nil {
 			g.dated = true
-			if !end.Before(start) {
+			// A task that has not ended yet is never historical. In the first
+			// half of February the spring term starts on the 15th, so without
+			// the second condition live deadlines would be classified as last
+			// semester and lose their reminders.
+			if !end.Before(start) || end.After(now) {
 				g.current = true
 			}
 		}

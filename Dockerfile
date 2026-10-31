@@ -19,5 +19,5 @@ USER 65532:65532
 ENV DUERADAR_LISTEN=0.0.0.0:8080 DUERADAR_DATA_DIR=/data
 EXPOSE 8080
 VOLUME ["/data"]
-HEALTHCHECK --interval=30s --timeout=6s CMD ["/dueradar", "-healthcheck", "http://127.0.0.1:8080/healthz"]
+HEALTHCHECK --interval=30s --timeout=6s CMD ["/dueradar", "-healthcheck-local"]
 ENTRYPOINT ["/dueradar"]

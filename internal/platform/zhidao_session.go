@@ -47,7 +47,15 @@ func (j *zhidaoJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 			}
 		}
 		if clone.MaxAge > 0 {
-			clone.Expires = time.Unix(now.Unix()+int64(clone.MaxAge), 0).UTC()
+			// Clamp like the Rain jar: a server-supplied Max-Age near the int64
+			// limit would otherwise overflow into the past and silently drop a
+			// refreshed session cookie.
+			last := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+			if int64(clone.MaxAge) > last.Unix()-now.Unix() {
+				clone.Expires = last
+			} else {
+				clone.Expires = time.Unix(now.Unix()+int64(clone.MaxAge), 0).UTC()
+			}
 			clone.MaxAge = 0
 		}
 		j.CookieJar.SetCookies(u, []*http.Cookie{&clone})

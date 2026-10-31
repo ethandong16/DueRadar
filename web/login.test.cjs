@@ -27,7 +27,7 @@ function browser(api) {
   const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
   const flow = source.slice(source.indexOf("  let activeLogin;"), source.indexOf("  function eventTitle("));
   assert.ok(flow.length > 100, "login flow found in application source");
-  const context = vm.createContext({ $, api, notify() {}, refreshState: async () => {},
+  const context = vm.createContext({ $, api, DueRadarTasks: require("./tasks.js"), notify() {}, refreshState: async () => {},
     setTimeout(fn) { timer = fn; return fn; }, clearTimeout(fn) { if (timer === fn) timer = null; },
   });
   vm.runInContext(flow, context);
@@ -78,6 +78,15 @@ test("a late closed-flow poll cannot change a later platform dialog", async () =
   await pending;
   assert.equal(page.$("rain-login-status").textContent, before);
   assert.equal(page.$("rain-dialog").open, true);
+});
+
+test("an expired QR leaves a transparent placeholder instead of a broken image", async () => {
+  const page = browser(async (url, method = "GET") => method === "POST" ? { image: "fixture-qr", expires_in: -1 } : { state: "waiting" });
+  await page.open("rain");
+  await page.poll();
+  assert.match(page.$("rain-qr").src, /^data:image\/gif;base64,/);
+  assert.equal(page.$("rain-qr").hidden, true);
+  assert.match(page.$("rain-login-status").textContent, /过期/);
 });
 
 test("successful login closes without canceling the confirmed session", async () => {

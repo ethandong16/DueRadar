@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -89,6 +92,17 @@ func TestAuthenticatedAPIAndCSRF(t *testing.T) {
 	}
 }
 
+func TestSecurityHeadersDisableUnneededBrowserCapabilities(t *testing.T) {
+	_, h := testApp(t)
+	w := request(h, "GET", "/healthz", "", nil, "")
+	if got := w.Header().Get("Permissions-Policy"); got != "camera=(), microphone=(), geolocation=(), payment=()" {
+		t.Fatalf("permissions policy=%q", got)
+	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
+		t.Fatalf("csp missing frame protection: %q", got)
+	}
+}
+
 func TestCredentialsNeverReturnedOrStoredInState(t *testing.T) {
 	s, h := testApp(t)
 	c := loginCookie(t, h)
@@ -114,6 +128,30 @@ func TestCredentialsNeverReturnedOrStoredInState(t *testing.T) {
 	}
 	if w := request(h, "POST", "/api/sync", `{}`, c, ""); w.Code != 409 {
 		t.Fatal("unverified platforms reported success")
+	}
+}
+
+func TestBarkTestDoesNotExposeTransportError(t *testing.T) {
+	s, h := testApp(t)
+	c := loginCookie(t, h)
+	if err := s.Vault.Update(func(config *vault.Config) error {
+		config.BarkURL, config.BarkKey = "https://api.day.app", "test-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "https://api.day.app/push?device_key=private-test-key"
+	s.sendBark = func(context.Context, string, string, string, string) error {
+		return errors.New(secret)
+	}
+	if w := request(h, "POST", "/api/bark/test", "", c, ""); w.Code != 502 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	} else if strings.Contains(w.Body.String(), secret) {
+		t.Fatal("transport error leaked in test response")
+	}
+	w := request(h, "GET", "/api/bark", "", c, "")
+	if strings.Contains(w.Body.String(), secret) {
+		t.Fatal("transport error leaked in bark status")
 	}
 }
 
@@ -146,6 +184,38 @@ func TestLoginRateLimitAndStrictJSON(t *testing.T) {
 	if w.Code != 429 {
 		t.Fatal("missing rate limit")
 	}
+	// The limiter must not let unauthenticated guesses lock out the owner. A
+	// reverse proxy makes every client share one RemoteAddr, so the correct
+	// password has to keep working even after the failure budget is spent.
+	w = request(h, "POST", "/api/login", `{"password":"test-password-long-enough"}`, nil, "")
+	if w.Code != 200 {
+		t.Fatalf("correct password was locked out by earlier failures: %d", w.Code)
+	}
+}
+
+func TestSettingsResponseReflectsStoredDefaults(t *testing.T) {
+	_, h := testApp(t)
+	c := loginCookie(t, h)
+	payload := `{"timezone":"Asia/Shanghai","quiet_enabled":true,"quiet_start":"23:00","quiet_end":"08:00","deadline_minutes":[1440],"exam_start_minutes":[60],"video_minutes":[4320],"in_class_enabled":true,"in_class_poll_seconds":0}`
+	w := request(h, "PUT", "/api/settings", payload, c, "")
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	var updated core.Settings
+	if err := json.Unmarshal(w.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.InClassPollSeconds != core.DefaultInClassPollSeconds {
+		t.Fatalf("PUT echoed normalized value: %d", updated.InClassPollSeconds)
+	}
+	w = request(h, "GET", "/api/settings", "", c, "")
+	var stored core.Settings
+	if err := json.Unmarshal(w.Body.Bytes(), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(updated, stored) {
+		t.Fatalf("response and stored settings differ: %+v vs %+v", updated, stored)
+	}
 }
 func TestDemoDoesNotSendOrSaveCredentials(t *testing.T) {
 	s, h := testApp(t)
@@ -161,5 +231,36 @@ func TestDemoDoesNotSendOrSaveCredentials(t *testing.T) {
 			b, _ := io.ReadAll(w.Result().Body)
 			t.Fatal(string(b))
 		}
+	}
+}
+
+func TestEventPayloadKeepsScheduledReminders(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	events := []core.Event{
+		{ID: "later-reminder", Status: "pending", CreatedAt: base, DueAt: base.Add(48 * time.Hour)},
+		{ID: "earlier-reminder", Status: "sending", CreatedAt: base, DueAt: base.Add(24 * time.Hour)},
+	}
+	for i := 0; i < 250; i++ {
+		events = append(events, core.Event{ID: fmt.Sprintf("sent-%03d", i), Status: "sent", CreatedAt: base.Add(time.Duration(i+1) * time.Minute)})
+	}
+	got := trimEvents(events, 200)
+	if len(got) != 200 {
+		t.Fatalf("len=%d", len(got))
+	}
+	if got[0].ID != "earlier-reminder" || got[1].ID != "later-reminder" {
+		t.Fatalf("scheduled reminders missing or out of order: %s, %s", got[0].ID, got[1].ID)
+	}
+	for _, event := range got {
+		if event.ID == "sent-000" {
+			t.Fatal("oldest history outranked newer history")
+		}
+	}
+	// An actionable backlog larger than the limit is itself bounded.
+	backlog := make([]core.Event, 0, 5)
+	for i := 0; i < 5; i++ {
+		backlog = append(backlog, core.Event{ID: fmt.Sprintf("pending-%d", i), Status: "pending", DueAt: base.Add(time.Duration(i) * time.Minute)})
+	}
+	if got := trimEvents(backlog, 3); len(got) != 3 || got[0].ID != "pending-0" {
+		t.Fatalf("active backlog not bounded by due order: %v", got)
 	}
 }

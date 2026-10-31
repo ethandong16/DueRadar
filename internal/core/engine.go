@@ -16,11 +16,21 @@ const MaxDeliveryAttempts = 6
 const FreshnessLimit = 30 * time.Minute
 const deliveryLease = 2 * time.Minute
 
+// EventRetention bounds terminal notification history. Pending and sending
+// events are always kept; a half-year window still covers a full semester and
+// keeps state writes small on the OpenStick-class devices this service targets.
+const EventRetention = 180 * 24 * time.Hour
+
 func validPlatform(p string) bool {
 	return p == PlatformRain || p == PlatformZhidaoShared || p == PlatformZhidaoCampus
 }
 
 func ValidateSettings(s Settings) error {
+	if strings.TrimSpace(s.Timezone) == "" {
+		// time.LoadLocation("") silently returns UTC, which would shift quiet
+		// hours and notification timestamps away from the configured locale.
+		return errors.New("timezone is required")
+	}
 	if _, err := time.LoadLocation(s.Timezone); err != nil {
 		return errors.New("unknown timezone")
 	}
@@ -98,6 +108,9 @@ func (e *Engine) UpdateSettingsAt(settings Settings, now time.Time) error {
 	if settings.InClassPollSeconds == 0 {
 		settings.InClassPollSeconds = DefaultInClassPollSeconds
 	}
+	if strings.TrimSpace(settings.Timezone) == "" {
+		settings.Timezone = "Asia/Shanghai"
+	}
 	if err := ValidateSettings(settings); err != nil {
 		return err
 	}
@@ -114,6 +127,55 @@ func (e *Engine) UpdateSettingsAt(settings Settings, now time.Time) error {
 		}
 		return nil
 	})
+}
+
+// Maintain prunes history that can no longer affect scheduling. It is safe to
+// call periodically: an unchanged state is not rewritten.
+func (e *Engine) Maintain(now time.Time) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	next := cloneState(e.state)
+	changed := pruneEvents(&next, now)
+	if pruneInClassSeen(&next, now) {
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	next = cloneState(next)
+	if err := e.save(next); err != nil {
+		return err
+	}
+	e.state = next
+	return nil
+}
+
+// pruneEvents reports whether the state changed. Events without a creation
+// time (older state files) are retained, and actionable events always survive.
+func pruneEvents(s *State, now time.Time) bool {
+	cutoff := now.Add(-EventRetention)
+	kept := s.Events[:0]
+	removed := false
+	for _, ev := range s.Events {
+		if !actionable(ev) && !ev.CreatedAt.IsZero() && ev.CreatedAt.Before(cutoff) {
+			removed = true
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	s.Events = kept
+	return removed
+}
+
+func pruneInClassSeen(s *State, now time.Time) bool {
+	removed := false
+	for key, seen := range s.InClassSeen {
+		if now.Sub(seen) > inClassSeenRetention {
+			delete(s.InClassSeen, key)
+			removed = true
+		}
+	}
+	return removed
 }
 
 func accountIndex(s *State, p string) int {
@@ -278,7 +340,12 @@ func (e *Engine) Fail(platform string, expired bool, message string, now time.Ti
 			a.Incident++
 		}
 		a.ConsecutiveFailures++
-		a.NeedsRevalidation = true
+		// Task reminders are already gated by SyncState=error and the freshness
+		// window. Only a known-expired login also pauses the independent in-class
+		// loop; marking every transient failure would discard live quiz alerts.
+		if expired {
+			a.NeedsRevalidation = true
+		}
 		a.SyncState = "error"
 		// Provider errors can contain signed URLs and credentials. Durable state
 		// deliberately records only a classified, fixed diagnostic.

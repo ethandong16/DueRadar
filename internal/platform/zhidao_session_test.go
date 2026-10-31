@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -37,6 +38,19 @@ func TestZhidaoCookieSnapshotReplacementDeletionAndExpiry(t *testing.T) {
 	jar.SetCookies(u, []*http.Cookie{{Name: "session", MaxAge: -1, Secure: true}})
 	if len(jar.snapshot()) != 0 || len(jar.Cookies(u)) != 0 {
 		t.Fatal("deleted cookie remained available")
+	}
+}
+
+func TestZhidaoCookieMaxAgeOverflowIsClamped(t *testing.T) {
+	_, jar := newZhidaoClient()
+	u, _ := url.Parse(zhidaoCloud)
+	jar.SetCookies(u, []*http.Cookie{{Name: "session", Value: "far-future", MaxAge: math.MaxInt, Secure: true}})
+	records := jar.snapshot()
+	if len(records) != 1 || !records[0].Cookie.Expires.After(time.Now()) || records[0].Cookie.Expires.Year() != 9999 {
+		t.Fatalf("overflowing Max-Age dropped or wrapped the cookie: %+v", records)
+	}
+	if len(jar.Cookies(u)) != 1 {
+		t.Fatal("clamped cookie was not usable")
 	}
 }
 

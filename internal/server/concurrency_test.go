@@ -118,6 +118,56 @@ func TestCancelDoesNotPromoteAnExpiredSavedSession(t *testing.T) {
 	}
 }
 
+func TestFailedRebindRevalidatesExistingBinding(t *testing.T) {
+	for _, stage := range []string{"creation", "scan"} {
+		t.Run(stage, func(t *testing.T) {
+			s, h := testApp(t)
+			admin := loginCookie(t, h)
+			if err := s.Vault.Update(func(c *vault.Config) error { c.RainCookie = "fixture-old"; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Engine.SetAccount(core.Account{Platform: core.PlatformRain, LoginState: "logged_in"}); err != nil {
+				t.Fatal(err)
+			}
+			reclaimed := make(chan struct{}, 1)
+			s.newRain = func(cookie string) rainAdapter {
+				return fakeRainAdapter{validate: func(context.Context) error {
+					if cookie == "fixture-old" {
+						select {
+						case reclaimed <- struct{}{}:
+						default:
+						}
+						return nil
+					}
+					return platform.ErrSessionExpired
+				}}
+			}
+			s.startRain = func(context.Context) (*rainFlow, error) {
+				if stage == "creation" {
+					return nil, errors.New("fixture QR failure")
+				}
+				return &rainFlow{wait: func(context.Context) (string, error) { return "", errors.New("fixture scan expiry") }}, nil
+			}
+			want := http.StatusOK
+			if stage == "creation" {
+				want = http.StatusBadGateway
+			}
+			if w := request(h, "POST", "/api/accounts/rain/login", "{}", admin, ""); w.Code != want {
+				t.Fatalf("status=%d", w.Code)
+			}
+			await(t, reclaimed)
+			eventually(t, func() bool {
+				for _, a := range s.Engine.Snapshot().Accounts {
+					if a.Platform == core.PlatformRain {
+						return a.LoginState == "logged_in" && !a.NeedsRevalidation
+					}
+				}
+				return false
+			})
+		})
+	}
+}
+
 func TestOlderQRCreationCannotReplaceNewerLogin(t *testing.T) {
 	s, h := testApp(t)
 	cookie := loginCookie(t, h)

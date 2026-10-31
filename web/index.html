@@ -14,8 +14,6 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#main">跳转至主要内容</a>
-
   <div id="boot" class="boot" role="status">
     <span class="radar-mark radar-mark--lg" aria-hidden="true"></span>
     <p>正在连接 DueRadar</p>
@@ -61,7 +59,7 @@
         <h2>登录</h2>
         <p class="login-form__hint">输入部署时设置的管理密码，进入这台设备上的任务雷达。</p>
         <label for="login-password">管理密码</label>
-        <input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="输入管理密码">
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="输入管理密码" aria-describedby="login-error">
         <p id="login-error" class="form-error" role="alert"></p>
         <button class="button primary full" type="submit">进入任务总览 <span aria-hidden="true">→</span></button>
         <p class="login-form__note">会话只保存在本机 · 数据不离开你的设备</p>
@@ -70,6 +68,9 @@
   </section>
 
   <div id="app" class="app-shell" hidden>
+    <!-- Lives inside the app shell: while the login screen is showing, #main
+         is hidden and a page-level skip link would lead nowhere. -->
+    <a class="skip-link" href="#main">跳转至主要内容</a>
     <aside class="rail">
       <div class="rail__top">
         <a class="brand" href="#tasks">
@@ -160,6 +161,7 @@
               <p class="horizon__label">下一道截止</p>
               <p class="horizon__next-title" id="next-title">读取中</p>
               <p class="horizon__next-meta"><span class="mono" id="next-when">—</span><span class="horizon__countdown" id="next-countdown">—</span></p>
+              <p class="horizon__next-reminder" id="next-reminder" hidden></p>
             </div>
             <dl class="horizon__stats">
               <div class="horizon__stat horizon__stat--alert"><dt>24 小时内</dt><dd id="stat-soon">0</dd></div>
@@ -225,7 +227,7 @@
                 </div>
                 </div>
               </div>
-              <div id="task-list" class="task-list" aria-live="polite"></div>
+              <div id="task-list" class="task-list"></div>
               <nav id="task-pagination" class="task-pagination" aria-label="任务分页" hidden>
                 <span id="task-page-label" role="status"></span>
                 <div>
@@ -390,7 +392,7 @@
             <div class="panel-heading">
               <div class="panel-heading__title">
                 <h2>通知事件</h2>
-                <p>按计划时间倒序 · 保留发送历史</p>
+                <p>按计划时间倒序 · 最近 200 条记录</p>
               </div>
               <span id="event-count" class="count-label">0</span>
             </div>
@@ -424,14 +426,14 @@
     </main>
   </div>
 
-  <dialog id="rain-dialog" class="dialog" aria-labelledby="rain-title">
+  <dialog id="rain-dialog" class="dialog" aria-labelledby="rain-title" aria-describedby="rain-description rain-login-status">
     <div class="dialog__head">
       <p class="eyebrow">平台绑定</p>
       <h2 id="rain-title">绑定普通雨课堂</h2>
       <p id="rain-description">通过平台官方二维码确认登录</p>
     </div>
     <div class="dialog__qr" id="rain-qr-frame">
-      <img id="rain-qr" alt="雨课堂登录二维码" width="300" height="300">
+      <img id="rain-qr" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="雨课堂登录二维码" width="300" height="300" hidden>
     </div>
     <div id="rain-assist" class="assist-panel" hidden>
       <p>在电脑的 DueRadar 项目目录启动辅助程序，按提示填写下面的信息。</p>

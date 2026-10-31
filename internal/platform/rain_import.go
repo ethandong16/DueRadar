@@ -47,7 +47,7 @@ func ImportRainBrowserSession(data []byte) (string, error) {
 		}
 		c.Domain = strings.ToLower(c.Domain)
 		switch c.Domain {
-		case "www.yuketang.cn", ".yuketang.cn":
+		case "www.yuketang.cn", ".www.yuketang.cn", ".yuketang.cn":
 		case "yuketang.cn":
 			c.Domain = ".yuketang.cn"
 		default:

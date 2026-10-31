@@ -61,6 +61,21 @@ func TestMarkHistoricalByCourse(t *testing.T) {
 	}
 }
 
+func TestFebruaryDeadlinesBeforeTermStartStayCurrent(t *testing.T) {
+	now := local("2027-02-10T12:00:00+08:00")
+	tasks := []Task{
+		{ID: "live", Platform: PlatformZhidaoCampus, Course: "数据结构", EndAt: at("2027-02-12T23:59:00+08:00")},
+		{ID: "past", Platform: PlatformZhidaoCampus, Course: "已结课课程", EndAt: at("2027-02-01T23:59:00+08:00")},
+	}
+	markHistorical(tasks, now, "Asia/Shanghai")
+	if tasks[0].Historical {
+		t.Fatal("a deadline that has not passed was marked historical")
+	}
+	if !tasks[1].Historical {
+		t.Fatal("an ended task in the same course remained current")
+	}
+}
+
 func TestHistoricalTasksProduceAndKeepNoReminders(t *testing.T) {
 	now := local("2026-10-22T20:00:00+08:00")
 	e := openTest(t)

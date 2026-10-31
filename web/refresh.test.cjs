@@ -20,8 +20,11 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(setImme
 function browser(intercept = null) {
   const elements = new Map();
   function element(tag = "div") {
+    let text = "";
     return {
-      tag, value: "", textContent: "", hidden: true, checked: false, disabled: false,
+      tag, value: "", hidden: true, checked: false, disabled: false,
+      get textContent() { return text; },
+      set textContent(value) { this.textWrites = (this.textWrites || 0) + 1; text = String(value); },
       children: [], listeners: {}, dataset: {}, open: false,
       classList: { add() {}, remove() {}, toggle() {} },
       addEventListener(name, fn) { this.listeners[name] = fn; },
@@ -49,8 +52,10 @@ function browser(intercept = null) {
   const timers = new Map();
   let nextTimer = 0;
   const document = { hidden: false, getElementById: $, createElement: element, createDocumentFragment: element, querySelectorAll: () => [], listeners: {}, addEventListener(name, fn) { this.listeners[name] = fn; } };
+  const location = { hash: "" };
+  const window = { listeners: {}, addEventListener(name, fn) { this.listeners[name] = fn; } };
   const page = {
-    $, calls, document, intercept, deferClose: false, closeEvents: [],
+    $, calls, document, location, window, intercept, deferClose: false, closeEvents: [],
     settings: { deadline_minutes: [1440, 180, 30], exam_start_minutes: [1440, 60], video_minutes: [4320, 1440, 180], quiet_enabled: true, quiet_start: "23:00", quiet_end: "08:00", timezone: "Asia/Shanghai" },
     click: (id) => $(id).emit("click"),
     submit: (id) => $(id).emit("submit", { submitter: $(id).querySelector("button") }),
@@ -77,7 +82,7 @@ function browser(intercept = null) {
     return response({});
   };
   const context = vm.createContext({ document, fetch, DueRadarTasks, AbortController, Intl, Date,
-    window: { addEventListener() {} }, location: { hash: "" }, history: { replaceState() {} },
+    window, location, history: { replaceState() {} },
     Option: function (text, value) { return { textContent: text, value }; },
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; }, clearTimeout(id) { timers.delete(id); }, setInterval(fn) { interval = fn; },
   });
@@ -248,6 +253,34 @@ test("a queued old close event cannot cancel a replacement QR creation", async (
 const fixtureTasks = [{ id: "performance-fixture", platform: "rain", title: "优先显示的测试任务", kind: "homework", status: "pending" }];
 function visibleText(element) { return [element.textContent, ...element.children.map(visibleText)].join(" "); }
 
+test("an in-page anchor does not replace the current view", async () => {
+  const page = browser();
+  await settle();
+  assert.equal(page.$("view-tasks").hidden, false);
+  page.location.hash = "#accounts";
+  page.window.listeners.hashchange();
+  assert.equal(page.$("view-accounts").hidden, false);
+  assert.equal(page.$("view-tasks").hidden, true);
+  page.location.hash = "#main";
+  page.window.listeners.hashchange();
+  assert.equal(page.$("view-accounts").hidden, false, "skip-link target must not switch views");
+  assert.equal(page.$("view-tasks").hidden, true);
+});
+
+test("a filter that matches nothing is not reported as an empty semester", async () => {
+  const tasks = [
+    { id: "current", platform: "rain", title: "本学期任务", kind: "homework", status: "pending", historical: false },
+    { id: "previous", platform: "rain", title: "上学期任务", kind: "homework", status: "completed", historical: true },
+  ];
+  const page = browser(({ url }) => url === "/api/tasks" ? response(tasks) : null);
+  await settle();
+  page.$("task-search").value = "no-such-task";
+  page.$("task-search").emit("input");
+  const text = visibleText(page.$("task-list"));
+  assert.match(text, /没有符合筛选条件/);
+  assert.doesNotMatch(text, /本学期暂无任务/);
+});
+
 for (const slowPath of ["/api/events", "/api/accounts", "/api/settings", "/api/bark", "/api/status"]) {
   test(`tasks appear while ${slowPath} is still pending`, async () => {
     const slow = deferred();
@@ -255,7 +288,8 @@ for (const slowPath of ["/api/events", "/api/accounts", "/api/settings", "/api/b
     await settle();
     assert.equal(page.$("app").hidden, false, "authenticated task list must not wait for auxiliary reads");
     assert.match(visibleText(page.$("task-list")), /优先显示的测试任务/);
-    assert.equal(page.$("connection-error").hidden, false, "pending sections must be visible");
+    assert.match(page.$("service-label").textContent, /正在读取信息/, "pending sections must be indicated");
+    assert.equal(page.$("connection-error").hidden, true, "loading progress is not an alert");
     if (slowPath === "/api/settings" || slowPath === "/api/status") assert.equal(page.$("settings-form").querySelector("button").disabled, true);
     if (slowPath === "/api/bark" || slowPath === "/api/status") assert.equal(page.$("bark-form").querySelector("button").disabled, true);
     slow.reject(new Error("auxiliary fixture failure"));
@@ -277,6 +311,7 @@ test("unknown authentication never fetches or reveals tasks", async () => {
   await settle();
   assert.equal(page.$("app").hidden, true);
   assert.equal(page.$("login-screen").hidden, false);
+  assert.equal(page.$("login-error").textContent, "", "a first visit is not an expired session");
   assert.deepEqual(page.calls.map(call => call.url), ["/api/session"]);
 });
 
@@ -289,6 +324,9 @@ for (const path of ["/api/tasks", "/api/settings"]) {
     await settle();
     assert.equal(page.$("app").hidden, true);
     assert.equal(page.$("login-screen").hidden, false);
+    if (path === "/api/settings") {
+      assert.match(page.$("login-error").textContent, /管理会话已过期/, "an already signed-in 401 explains the return to login");
+    }
     other.resolve(response({ configured: true, server: "fixture" }));
     await settle();
     assert.equal(page.$("app").hidden, true);
@@ -311,6 +349,20 @@ test("an auxiliary failure does not release the refresh gate while another read 
   await settle();
   assert.equal(page.calls.filter(call => call.url === "/api/session").length, 2, "all queued callers share one subsequent refresh");
   assert.equal(page.$("connection-error").hidden, true, "successful retry clears partial failure");
+});
+
+test("an unchanged refresh failure is not re-announced", async () => {
+  let failing = false;
+  const page = browser(({ url }) => failing && url === "/api/tasks" ? response({ error: "persistent fixture failure" }, 500) : null);
+  await settle();
+  failing = true;
+  page.tick();
+  await settle();
+  assert.match(page.$("connection-error").textContent, /persistent fixture failure/);
+  const writes = page.$("connection-error").textWrites;
+  page.tick();
+  await settle();
+  assert.equal(page.$("connection-error").textWrites, writes, "the alert live region must not be rewritten with identical text");
 });
 
 test("a critical task failure is visible without presenting an empty successful list", async () => {

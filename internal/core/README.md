@@ -52,6 +52,11 @@ at first discovery or after settings changes. Completed history is retained.
 Full snapshots must contain unique IDs per platform. Unknown timestamps must
 be `nil`, never invented by an adapter.
 
+`Maintain(now)` bounds history growth: it removes terminal events older than
+`EventRetention` (180 days) and stale in-class deduplication keys. Pending and
+sending events always survive, as do legacy events without a creation time. An
+unchanged state is not rewritten.
+
 State writes use a private temporary file, file sync, and atomic rename in the
 same directory. The store is thread safe within a single process; run only one
 process per data directory. Successful remote delivery followed by a process

@@ -4,9 +4,87 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 )
+
+func TestOpenNormalizesCredentialFileModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not portable to Windows")
+	}
+	dir := t.TempDir()
+	v, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Set(Config{BarkKey: "mode-test"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"master.key", "secrets.enc"} {
+		path := filepath.Join(dir, name)
+		if err := os.Chmod(path, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"master.key", "secrets.enc"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0600 {
+			t.Errorf("%s mode = %04o, want 0600", name, got)
+		}
+	}
+}
+
+func TestShortKeyRegeneratesOnlyWithoutCiphertext(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "master.key")
+	if err := os.WriteFile(keyPath, make([]byte, 16), 0600); err != nil {
+		t.Fatal(err)
+	}
+	v, err := Open(dir)
+	if err != nil {
+		t.Fatal("a short key without ciphertext must be recoverable:", err)
+	}
+	if err := v.Set(Config{BarkKey: "recovered-key"}); err != nil {
+		t.Fatal(err)
+	}
+	key, err := os.ReadFile(keyPath)
+	if err != nil || len(key) != 32 {
+		t.Fatalf("key length = %d, want 32 (err %v)", len(key), err)
+	}
+	reopened, err := Open(dir)
+	if err != nil || reopened.Get().BarkKey != "recovered-key" {
+		t.Fatal("regenerated key did not round-trip credentials", err)
+	}
+}
+
+func TestInvalidKeyIsNotReplacedWhileCiphertextExists(t *testing.T) {
+	dir := t.TempDir()
+	v, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Set(Config{BarkKey: "original-key"}); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "master.key")
+	if err := os.WriteFile(keyPath, make([]byte, 16), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); err == nil {
+		t.Fatal("truncated key accepted while ciphertext exists")
+	}
+	key, err := os.ReadFile(keyPath)
+	if err != nil || len(key) != 16 {
+		t.Fatalf("invalid key was replaced: length %d, err %v", len(key), err)
+	}
+}
 
 func TestEncryptedRoundTripAndTampering(t *testing.T) {
 	dir := t.TempDir()

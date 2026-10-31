@@ -119,7 +119,13 @@ func (r *Rain) Tasks(ctx context.Context) ([]core.Task, error) {
 		if !rainPositiveID(course.ClassroomID) || strings.TrimSpace(course.Course.Name) == "" {
 			return nil, errors.New("雨课堂课程缺少标识或名称")
 		}
+		// Canonicalize the numeric ID: json.Number preserves leading zeros such as
+		// "0100", which validate as positive but make json.Marshal reject the
+		// later pub_new_pro body, discarding the whole snapshot.
 		cid := course.ClassroomID.String()
+		if n, err := strconv.ParseUint(cid, 10, 64); err == nil {
+			cid = strconv.FormatUint(n, 10)
+		}
 		if classrooms[cid] {
 			return nil, errors.New("雨课堂课程列表包含重复班级")
 		}
@@ -221,7 +227,10 @@ func (r *Rain) cloudTasks(ctx context.Context, cid, courseName string, activitie
 		for _, a := range activities[start:end] {
 			newsIDs = append(newsIDs, a.CoursewareID.String())
 		}
-		body, _ := json.Marshal(map[string]any{"cid": json.Number(cid), "new_id": newsIDs})
+		body, err := json.Marshal(map[string]any{"cid": json.Number(cid), "new_id": newsIDs})
+		if err != nil {
+			return nil, errors.New("雨课堂云端进度请求格式变化")
+		}
 		env, err := r.request(ctx, http.MethodPost, "/mooc-api/v1/lms/learn/course/pub_new_pro", cid, bytes.NewReader(body))
 		if err != nil {
 			return nil, err

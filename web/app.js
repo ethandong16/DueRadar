@@ -32,7 +32,7 @@
   }
 
   function badge(label, tone = "neutral") { return node("span", `badge ${tone}`, label); }
-  function timestamp(value) { const date = value ? new Date(value) : null; return date && Number.isFinite(date.getTime()) ? date : null; }
+  function timestamp(value) { const ms = DueRadarTasks.parseTime(value); return Number.isFinite(ms) ? new Date(ms) : null; }
   function formatDate(value, short = false) {
     const date = timestamp(value);
     if (!date) return "未知";
@@ -93,7 +93,7 @@
     $("toast").hidden = false;
     toastTimer = setTimeout(() => { $("toast").hidden = true; }, error ? 7000 : 4000);
   }
-  function showLogin() {
+  function showLogin(message = "") {
     authGeneration++;
     authenticated = false;
     state = null;
@@ -104,6 +104,8 @@
     $("boot").hidden = true;
     $("app").hidden = true;
     $("login-screen").hidden = false;
+    $("login-error").textContent = message;
+    $("login-password").focus();
   }
   async function api(path, method = "GET", body) {
     const generation = authGeneration;
@@ -116,7 +118,9 @@
       const result = contentType.includes("application/json") ? await response.json() : { message: (await response.text()).slice(0, 300) };
       if (generation !== authGeneration) throw stale();
       if (!response.ok) {
-        if (response.status === 401 && path !== "/api/login") showLogin();
+        // Only call it an expired session if the user had actually signed in;
+        // the first /api/session probe of a fresh visit also returns 401.
+        if (response.status === 401 && path !== "/api/login") showLogin(authenticated ? "管理会话已过期，请重新登录。" : "");
         throw new Error(result.error || result.message || `请求失败（${response.status}）`);
       }
       return result;
@@ -151,7 +155,7 @@
     const icon = node("span", "empty-icon", "◎"); icon.setAttribute("aria-hidden", "true");
     wrap.append(icon, node("h3", "", title));
     if (message) wrap.append(node("p", "", message));
-    if (action) { const button = node("button", "button secondary", action.label); button.type = "button"; button.addEventListener("click", action.run); wrap.append(button); }
+    if (action) { const button = node("button", "button secondary", action.label); button.type = "button"; button.dataset.focusKey = `empty:${action.label}`; button.addEventListener("click", action.run); wrap.append(button); }
     return wrap;
   }
   function deadlineLabel(task) {
@@ -185,7 +189,10 @@
     const page = DueRadarTasks.paginate(filtered, taskPage);
     taskPage = page.page;
     $("task-pagination").hidden = filtered.length === 0;
-    $("task-page-label").textContent = `显示 ${page.start}–${page.end} 项，共 ${page.total} 项 · 第 ${page.page}/${page.pages} 页`;
+    const pageLabel = `显示 ${page.start}–${page.end} 项，共 ${page.total} 项 · 第 ${page.page}/${page.pages} 页`;
+    // This element is a live region; writing an identical string on every
+    // background refresh would re-announce the same page count.
+    if ($("task-page-label").textContent !== pageLabel) $("task-page-label").textContent = pageLabel;
     $("task-prev").disabled = page.page <= 1;
     $("task-next").disabled = page.page >= page.pages;
     $("task-count").textContent = filtered.length;
@@ -194,7 +201,10 @@
       const zone = state.settings?.timezone || defaults.timezone;
       const scoped = DueRadarTasks.scopeTasks(tasks, { scope, timezone: zone });
       const hiddenHistory = DueRadarTasks.scopeTasks(tasks, { scope: "all", timezone: zone }).length > DueRadarTasks.scopeTasks(tasks, { scope: "current", timezone: zone }).length;
-      if (scope === "current" && hiddenHistory) {
+      // "No tasks this semester" is only true when the semester itself is empty.
+      // With tasks present, an empty filtered list means the filters matched
+      // nothing, even if every current-semester task was filtered out.
+      if (scope === "current" && scoped.length === 0 && hiddenHistory) {
         $("task-list").append(emptyState("本学期暂无任务", "", { label: "查看历史学期", run: () => { $("scope-filter").value = "all"; taskPage = 1; render(); } }));
       } else if (scoped.length) {
         $("task-list").append(emptyState("没有符合筛选条件的任务", "", { label: "清除筛选", run: () => { statusFilter = "all"; taskPage = 1; $("task-search").value = ""; for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all"; $("scope-filter").value = "current"; render(); } }));
@@ -244,7 +254,7 @@
         const foot = node("div", "task-foot");
         foot.append(node("span", `deadline-main${deadline.urgent && !isCompleted ? " urgent" : ""}`, isCompleted ? "平台已记录完成" : deadline.main));
         const source = DueRadarTasks.safeSource(task.source_url);
-        if (source) { const link = node("a", "task-source", "打开课程平台 ↗"); link.href = source; link.target = "_blank"; link.rel = "noopener noreferrer"; foot.append(link); }
+        if (source) { const link = node("a", "task-source", "打开课程平台 ↗"); link.href = source; link.target = "_blank"; link.rel = "noopener noreferrer"; link.dataset.focusKey = `task:${task.platform}:${task.id}:source`; foot.append(link); }
         main.append(foot);
         main.title = `最近观测：${formatDate(task.last_seen_at)}`;
         const mark = node("span", `task-kind ${kind}`, { homework: "作", exam: "考", chapter: "章", video: "视" }[kind]);
@@ -274,18 +284,22 @@
       if (Number(platform.failures) > 0) card.append(node("p", "platform-date", `连续失败：${Number(platform.failures)} 轮`));
       if (["rain", "zhidao_campus"].includes(platform.id) && platform.ready && state.runtime && !state.demo) {
         const bind = node("button", "button primary", platform.login_status === "logged_in" ? "重新扫码绑定" : (platform.id === "rain" ? "微信扫码绑定" : "知到 APP 扫码绑定"));
-        bind.type = "button"; bind.addEventListener("click", () => busy(bind, () => openRainLogin(platform.id))); card.append(bind);
+        bind.type = "button"; bind.dataset.focusKey = `platform:${platform.id}:bind`; bind.addEventListener("click", () => busy(bind, () => openRainLogin(platform.id))); card.append(bind);
         if (platform.id === "rain") {
           const assist = node("button", "button secondary assist-button", "账号密码登录（电脑辅助）");
-          assist.type = "button"; assist.addEventListener("click", () => busy(assist, () => openRainLogin("rain", "assist"))); card.append(assist);
+          assist.type = "button"; assist.dataset.focusKey = "platform:rain:assist"; assist.addEventListener("click", () => busy(assist, () => openRainLogin("rain", "assist"))); card.append(assist);
         }
       }
       $("platform-list").append(card);
     }
   }
   let activeLogin;
+  const blankQr = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
   function clearLoginSecrets() {
-    $("rain-qr").removeAttribute("src");
+    // Keep a valid transparent source while the dialog stays open: removing the
+    // src entirely would leave a broken-image icon when a QR flow expires.
+    $("rain-qr").src = blankQr;
+    $("rain-qr").hidden = true;
     for (const id of ["assist-instance", "assist-flow", "assist-code"]) $(id).value = "";
     $("assist-expires").textContent = "";
   }
@@ -315,7 +329,8 @@
       throw error;
     }
     if (activeLogin !== login) return;
-    login.deadline = assist ? Date.parse(result.expires_at) : Date.now() + (result.expires_in || 180) * 1000;
+    const declaredDeadline = assist ? DueRadarTasks.parseTime(result.expires_at) : NaN;
+    login.deadline = assist ? (Number.isFinite(declaredDeadline) ? declaredDeadline : Date.now() + 300000) : Date.now() + (result.expires_in || 180) * 1000;
     if (assist) login.path += `/${encodeURIComponent(result.flow_id)}`;
     $("rain-title").textContent = assist ? "电脑辅助登录普通雨课堂" : `绑定${label}`;
     $("rain-description").textContent = assist ? "在电脑上打开官方登录页，输入账号密码并完成平台验证。" : "通过平台官方二维码确认登录";
@@ -326,7 +341,7 @@
       $("assist-instance").value = location.origin;
       $("assist-flow").value = result.flow_id;
       $("assist-code").value = result.pairing_code;
-      $("assist-expires").textContent = `配对有效至 ${new Date(result.expires_at).toLocaleTimeString("zh-CN")}，关闭弹窗将取消本次绑定。`;
+      $("assist-expires").textContent = Number.isFinite(declaredDeadline) ? `配对有效至 ${new Date(declaredDeadline).toLocaleTimeString("zh-CN")}，关闭弹窗将取消本次绑定。` : "关闭弹窗将取消本次绑定。";
       $("rain-login-status").textContent = "等待电脑辅助程序连接。";
     } else {
       $("rain-qr").alt = `${label}官方登录二维码`;
@@ -353,13 +368,17 @@
         }
         if (assist) {
           const messages = { awaiting_helper: "等待电脑辅助程序连接。", awaiting_user: "辅助程序已连接，请在官方页面完成账号密码和验证码登录。", verifying: "设备正在独立验证登录会话，请稍候。" };
-          $("rain-login-status").textContent = messages[result.state] || "等待登录结果。";
+          const text = messages[result.state] || "等待登录结果。";
+          // role=status is announced on text mutation; an identical 2-second
+          // rewrite would repeat the same sentence indefinitely.
+          if ($("rain-login-status").textContent !== text) $("rain-login-status").textContent = text;
           if (result.state !== "awaiting_helper") $("assist-code").value = "";
         }
         login.timer = setTimeout(poll, 2000);
       } catch (error) {
         if (activeLogin === login && $("rain-dialog").open) {
-          $("rain-login-status").textContent = `暂未取得登录状态，正在重试：${error.message}`;
+          const text = `暂未取得登录状态，正在重试：${error.message}`;
+          if ($("rain-login-status").textContent !== text) $("rain-login-status").textContent = text;
           login.timer = setTimeout(poll, 2000);
         }
       }
@@ -414,7 +433,23 @@
     $("in-class-enabled").checked = settings.in_class_enabled !== false;
     $("in-class-poll").value = settings.in_class_poll_seconds || defaults.in_class_poll_seconds;
   }
+  // Background refreshes rebuild these lists. Without restoring focus, a
+  // keyboard user who is tabbing through a task or platform loses their place
+  // every 30 seconds.
+  function activeFocusKey() {
+    const active = document.activeElement;
+    if (!active || typeof active.closest !== "function") return "";
+    if (!active.closest("#task-list, #platform-list")) return "";
+    return active.dataset?.focusKey || "";
+  }
+  function restoreFocus(key) {
+    if (!key || typeof document.querySelector !== "function") return;
+    let target = null;
+    try { target = document.querySelector(`[data-focus-key="${key.replace(/["\\]/g, "\\$&")}"]`); } catch { return; }
+    if (target && typeof target.focus === "function") target.focus({ preventScroll: true });
+  }
   function render() {
+    const focusKey = activeFocusKey();
     const tasks = DueRadarTasks.scopeTasks(state.tasks, { scope: $("scope-filter").value, timezone: state.settings?.timezone || defaults.timezone });
     const pending = tasks.filter((task) => task.status === "pending");
     $("stat-pending").textContent = pending.length;
@@ -427,7 +462,10 @@
     $("stat-platforms").textContent = state.platforms.filter((platform) => ["logged_in", "authenticated", "active"].includes(platform.login_status)).length;
     $("stat-platform-total").textContent = ` / ${state.platforms.length}`;
     const recent = state.platforms.map((platform) => timestamp(platform.last_success)).filter(Boolean).sort((a, b) => b - a)[0];
-    $("stat-sync").textContent = recent ? formatDate(recent, true) : "尚无成功记录";
+    const age = recent ? DueRadarTasks.ageLabel(recent) : null;
+    $("stat-sync").textContent = age || "尚无成功记录";
+    $("stat-sync").title = recent ? `最近成功同步：${formatDate(recent)}` : "";
+    $("stat-sync").classList.toggle("is-stale", Boolean(age) && Date.now() - recent.getTime() > 30 * 60000);
     const next = pending
       .map((task) => ({ task, moment: nextMoment(task) }))
       .filter((entry) => entry.moment)
@@ -436,6 +474,13 @@
     $("next-title").textContent = next ? next.task.title : "暂无临近截止";
     $("next-when").textContent = next ? `${next.moment.label} · ${formatDate(next.moment.at, true)}` : "等待平台提供新的任务";
     $("next-countdown").textContent = next ? relativeLabel(next.moment.at, next.moment.verb) : "—";
+    const reminder = next ? DueRadarTasks.nextReminder(state.events, next.task.id) : null;
+    $("next-reminder").hidden = !reminder;
+    if (reminder) {
+      const lead = DueRadarTasks.leadLabel(reminder.minutes);
+      const when = reminder.at <= Date.now() ? "提醒待发送" : `提醒 ${formatDate(new Date(reminder.at), true)}`;
+      $("next-reminder").textContent = lead ? `${when} · 提前 ${lead}` : when;
+    }
     const selectedPlatform = $("platform-filter").value;
     $("platform-filter").replaceChildren(new Option("全部平台", "all"));
     const ids = new Set([...state.platforms.map((platform) => platform.id), ...state.tasks.map((task) => task.platform)].filter(Boolean));
@@ -485,6 +530,7 @@
       $("today").textContent = `${day} · ${week}`;
     } catch { $("today").textContent = new Date().toLocaleDateString("zh-CN"); }
     updateFilterTabs(); renderTasks(); renderPlatforms(); renderEvents();
+    restoreFocus(focusKey);
   }
   function refreshState(showSuccess = false) {
     const generation = authGeneration;
@@ -499,7 +545,11 @@
       if (generation !== authGeneration || error.name === "StaleSessionError" || job.queued) return;
       $("boot").hidden = true;
       if (!authenticated) { showLogin(); if (!String(error.message).includes("401") && !/unauthorized|未登录|认证|登录/i.test(error.message)) $("login-error").textContent = `连接服务失败：${error.message}`; }
-      else { $("connection-error").textContent = `状态刷新失败：${error.message}。当前显示上次成功读取的数据。`; $("connection-error").hidden = false; $("service-label").textContent = "连接暂时中断"; $("service-dot").classList.add("offline"); }
+      else {
+        const text = `状态刷新失败：${error.message}。当前显示上次成功读取的数据。`;
+        if ($("connection-error").textContent !== text) $("connection-error").textContent = text;
+        $("connection-error").hidden = false; $("service-label").textContent = "连接暂时中断"; $("service-dot").classList.add("offline");
+      }
     };
     job.promise = (async () => {
       try {
@@ -520,11 +570,14 @@
               state = { ...snapshot };
               authenticated = true;
               $("boot").hidden = true; $("login-screen").hidden = true; $("app").hidden = false;
-              const messages = [...errors].map(([key, error]) => `${sections[key]}加载失败：${error.message}。该部分保留上次数据（如有）。`);
-              if (pending.size) messages.push(`正在加载：${[...pending].map(key => sections[key]).join("、")}。`);
-              $("connection-error").textContent = messages.join(" ");
-              $("connection-error").hidden = messages.length === 0;
-              $("service-label").textContent = errors.size ? "部分信息加载失败" : "管理服务已连接";
+              // Errors go to the alert region and are only rewritten when the
+              // text changes, so a persistent failure is announced once rather
+              // than on every 30-second refresh. Transient loading progress is
+              // not an alert: it belongs in the non-live service label.
+              const errorText = [...errors].map(([key, error]) => `${sections[key]}加载失败：${error.message}。该部分保留上次数据（如有）。`).join(" ");
+              if ($("connection-error").textContent !== errorText) $("connection-error").textContent = errorText;
+              $("connection-error").hidden = errorText.length === 0;
+              $("service-label").textContent = errors.size ? "部分信息加载失败" : pending.size ? "正在读取信息" : "管理服务已连接";
               $("service-dot").classList.toggle("offline", errors.size > 0);
               render();
             };
@@ -574,7 +627,12 @@
   }
 
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => changeView(button.dataset.view)));
-  window.addEventListener("hashchange", () => changeView(location.hash.slice(1), false));
+  window.addEventListener("hashchange", () => {
+    const hash = location.hash.slice(1);
+    // In-page anchors such as the skip link's #main are not views. Falling back
+    // to 任务总览 here would silently switch the user's current section.
+    if (Object.hasOwn(viewNames, hash)) changeView(hash, false);
+  });
   document.querySelectorAll("[data-status]").forEach((button) => button.addEventListener("click", () => { statusFilter = button.dataset.status; taskPage = 1; updateFilterTabs(); renderTasks(); }));
   $("task-search").addEventListener("input", () => { taskPage = 1; renderTasks(); });
   for (const id of ["platform-filter", "kind-filter", "deadline-filter", "scope-filter"]) $(id).addEventListener("change", () => { taskPage = 1; render(); });
@@ -583,11 +641,19 @@
   $("settings-form").addEventListener("input", () => { settingsDirty = true; });
   $("bark-form").addEventListener("input", () => { barkDirty = true; });
   $("login-form").addEventListener("submit", async (event) => {
-    event.preventDefault(); const button = event.submitter || $("login-form").querySelector("button"); button.disabled = true; $("login-error").textContent = "";
-    try { await api("/api/login", "POST", { password: $("login-password").value }); authGeneration++; $("login-password").value = ""; await refreshState(); }
-    catch (error) { if (error.name !== "StaleSessionError") $("login-error").textContent = error.message; }
+    event.preventDefault(); const button = event.submitter || $("login-form").querySelector("button"); button.disabled = true; $("login-error").textContent = ""; $("login-password").removeAttribute("aria-invalid");
+    try {
+      await api("/api/login", "POST", { password: $("login-password").value }); authGeneration++; $("login-password").value = ""; await refreshState();
+      // The app is revealed as soon as tasks arrive, before slow auxiliary
+      // reads settle. Only move focus if the user has not already started
+      // using the newly visible page.
+      const active = document.activeElement;
+      if (!active || active === document.body || (typeof active.closest === "function" && active.closest("#login-screen"))) $("main").focus({ preventScroll: true });
+    }
+    catch (error) { if (error.name !== "StaleSessionError") { $("login-error").textContent = error.message; $("login-password").setAttribute("aria-invalid", "true"); } }
     finally { button.disabled = false; }
   });
+  $("login-password").addEventListener("input", () => { $("login-password").removeAttribute("aria-invalid"); $("login-error").textContent = ""; });
   $("logout").addEventListener("click", (event) => busy(event.currentTarget, async () => { authGeneration++; clearActiveLogin(); await api("/api/logout", "POST"); showLogin(); $("login-password").focus(); }));
   $("refresh").addEventListener("click", (event) => busy(event.currentTarget, () => refreshState(true)));
   $("sync").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/sync", "POST"); if (await refreshState()) notify(result.message || "已开始同步。"); }));
@@ -616,7 +682,12 @@
   });
   function syncThemeControls() {
     const dark = document.documentElement?.dataset.theme === "dark";
-    document.querySelectorAll("[data-theme-toggle]").forEach((button) => button.setAttribute("aria-pressed", String(dark)));
+    document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
+      button.setAttribute("aria-pressed", String(dark));
+      const label = dark ? "切换到浅色主题" : "切换到深色主题";
+      button.setAttribute("aria-label", label);
+      button.setAttribute("title", label);
+    });
   }
   document.querySelectorAll("[data-theme-toggle]").forEach((button) => button.addEventListener("click", () => {
     const root = document.documentElement;

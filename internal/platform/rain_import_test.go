@@ -174,7 +174,7 @@ func TestImportRainBrowserSessionRejectsInvalidCookies(t *testing.T) {
 	}{
 		{"name", ""}, {"name", "bad name"}, {"name", "bad;name"},
 		{"value", "fixture-secret\r\nInjected: yes"}, {"value", "bad;value"},
-		{"domain", ""}, {"domain", ".www.yuketang.cn"}, {"domain", "evil.example"},
+		{"domain", ""}, {"domain", "evil.example"},
 		{"domain", "www.yuketang.cn.evil.example"}, {"domain", "cn"}, {"domain", "www.yuketang.cn:443"},
 		{"path", ""}, {"path", "api"}, {"path", "/api;invalid"}, {"path", "/api\r\n"},
 		{"secure", "true"}, {"http_only", 1},
@@ -216,6 +216,16 @@ func TestImportRainBrowserSessionRequiresEffectiveValidationCookies(t *testing.T
 	cookie := map[string]any{"name": "sessionid", "value": "fixture-secret", "domain": "www.yuketang.cn", "path": "/api"}
 	if _, err := ImportRainBrowserSession(rainBrowserPayload(t, cookie)); err != nil {
 		t.Fatal("API-scoped session cookie was rejected", err)
+	}
+	// Chromium/Playwright report a Domain=www.yuketang.cn cookie with a leading
+	// dot. The assisted-login helper forwards that form, and the cookie jar
+	// already accepts it, so import must not be the one rejecting a valid export.
+	for _, domain := range []string{".www.yuketang.cn", ".WWW.YUKETANG.CN"} {
+		cookie := rainBrowserCookieFixture()
+		cookie["domain"] = domain
+		if encoded, err := ImportRainBrowserSession(rainBrowserPayload(t, cookie)); err != nil || encoded == "" {
+			t.Fatalf("browser domain %q was rejected: %v", domain, err)
+		}
 	}
 }
 

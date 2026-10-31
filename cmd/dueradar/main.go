@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -27,10 +28,17 @@ func main() {
 	secure := flag.Bool("secure-cookies", os.Getenv("DUERADAR_SECURE_COOKIES") == "true", "require HTTPS for admin cookies")
 	version := flag.Bool("version", false, "print version")
 	health := flag.String("healthcheck", "", "check a running health URL and exit")
+	localHealth := flag.Bool("healthcheck-local", false, "check the health endpoint at the configured -listen address and exit")
 	flag.Parse()
 	if *version {
 		fmt.Println(server.Version)
 		return
+	}
+	if *localHealth {
+		*health = localHealthURL(*listen)
+		if *health == "" {
+			os.Exit(1)
+		}
 	}
 	if *health != "" {
 		client := http.Client{Timeout: 5 * time.Second}
@@ -105,6 +113,20 @@ func main() {
 	if serveErr != nil && serveErr != http.ErrServerClosed {
 		os.Exit(1)
 	}
+}
+
+// localHealthURL derives a loopback health URL from the configured listen
+// address, so containers with a non-default DUERADAR_LISTEN stay healthy.
+func localHealthURL(listen string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(listen))
+	if err != nil {
+		return ""
+	}
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/healthz"
 }
 
 func env(name, fallback string) string {

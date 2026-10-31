@@ -54,6 +54,22 @@ func withoutQuiet(t *testing.T, e *Engine, now time.Time) {
 	}
 }
 
+func TestEmptyTimezoneDefaultsInsteadOfSilentUTC(t *testing.T) {
+	e := openTest(t)
+	now := stamp("2026-10-21T10:00:00+08:00")
+	s := DefaultSettings()
+	s.Timezone = ""
+	if err := e.UpdateSettingsAt(s, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.Snapshot().Settings.Timezone; got != "Asia/Shanghai" {
+		t.Fatalf("timezone = %q, want Asia/Shanghai", got)
+	}
+	if err := ValidateSettings(s); err == nil {
+		t.Fatal("empty timezone must not validate")
+	}
+}
+
 func TestDefaultSettingsAndQuietBoundaries(t *testing.T) {
 	s := DefaultSettings()
 	if fmt.Sprint(s.DeadlineMinutes) != "[1440 180 30]" || fmt.Sprint(s.ExamStartMinutes) != "[1440 60]" || fmt.Sprint(s.VideoMinutes) != "[4320 1440 180]" {
@@ -533,5 +549,56 @@ func TestPendingWithErrorDoesNotHideFailedClaimCommit(t *testing.T) {
 		if event.Attempts != 0 || event.Status == "sending" {
 			t.Fatal("failed durable claim changed in-memory state")
 		}
+	}
+}
+
+func TestMaintainPrunesOnlyExpiredTerminalHistory(t *testing.T) {
+	e := openTest(t)
+	now := stamp("2026-10-22T10:00:00+08:00")
+	old := now.Add(-EventRetention - time.Hour)
+	recent := now.Add(-EventRetention + time.Hour)
+	if err := e.change(func(s *State) error {
+		s.Events = append(s.Events,
+			Event{ID: "old-sent", Status: "sent", CreatedAt: old},
+			Event{ID: "old-canceled", Status: "canceled", CreatedAt: old},
+			Event{ID: "recent-sent", Status: "sent", CreatedAt: recent},
+			Event{ID: "old-pending", Status: "pending", CreatedAt: old},
+			Event{ID: "no-created-at", Status: "sent"},
+		)
+		s.InClassSeen = map[string]time.Time{"old": old, "recent": now.Add(-time.Hour)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Maintain(now); err != nil {
+		t.Fatal(err)
+	}
+	state := e.Snapshot()
+	kept := map[string]bool{}
+	for _, event := range state.Events {
+		kept[event.ID] = true
+	}
+	for _, id := range []string{"old-sent", "old-canceled"} {
+		if kept[id] {
+			t.Errorf("expired terminal event %s was retained", id)
+		}
+	}
+	for _, id := range []string{"recent-sent", "old-pending", "no-created-at"} {
+		if !kept[id] {
+			t.Errorf("event %s should be retained", id)
+		}
+	}
+	if _, ok := state.InClassSeen["old"]; ok {
+		t.Error("expired in-class dedup key was retained")
+	}
+	if _, ok := state.InClassSeen["recent"]; !ok {
+		t.Error("current in-class dedup key was pruned")
+	}
+	// A second pass with nothing to remove must stay a no-op and keep the state.
+	if err := e.Maintain(now); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.Snapshot().Events) != 3 {
+		t.Fatal("second maintenance pass removed retained events")
 	}
 }

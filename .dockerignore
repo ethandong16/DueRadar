@@ -5,3 +5,9 @@ data
 dist
 .env*
 node_modules
+magpie-session-*.md
+*.exe
+*.test
+*.log
+.workbuddy-ai
+.codex

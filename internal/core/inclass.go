@@ -72,11 +72,7 @@ func (e *Engine) ReportInClass(platform string, items []InClassQuiz, now time.Ti
 		if s.InClassSeen == nil {
 			s.InClassSeen = map[string]time.Time{}
 		}
-		for key, seen := range s.InClassSeen {
-			if now.Sub(seen) > inClassSeenRetention {
-				delete(s.InClassSeen, key)
-			}
-		}
+		pruneInClassSeen(s, now)
 		for _, item := range items {
 			key := platform + "\x00" + item.ClassroomID + "\x00" + item.ActivityID
 			if _, seen := s.InClassSeen[key]; seen {

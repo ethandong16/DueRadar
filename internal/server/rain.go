@@ -72,6 +72,9 @@ func (s *Server) startRainLogin(w http.ResponseWriter, r *http.Request) {
 		_ = s.Engine.SetAccount(core.Account{Platform: core.PlatformRain, LoginState: "failed", LastError: s.rainError})
 		s.rainMu.Unlock()
 		loginCancel()
+		// The stored binding was never replaced. Revalidate it now instead of
+		// leaving every reminder suppressed until the next scheduled sync.
+		s.queueSync()
 		fail(w, 502, "二维码创建失败，请重试")
 		return
 	}
@@ -105,17 +108,24 @@ func (s *Server) startRainLogin(w http.ResponseWriter, r *http.Request) {
 			s.rainState, s.rainError = "failed", "扫码登录未完成，请重试"
 			_ = s.Engine.SetAccount(core.Account{Platform: core.PlatformRain, LoginState: "failed", LastError: s.rainError})
 			s.rainMu.Unlock()
+			// The previous stored cookie is untouched; verify whether it still
+			// works so a failed rebind does not pause delivery for a full cycle.
+			s.queueSync()
 			return
 		}
 		if err = s.Vault.Update(func(c *vault.Config) error { c.RainCookie = cookie; return nil }); err != nil {
 			s.rainState, s.rainError = "failed", "会话保存失败"
 			_ = s.Engine.SetAccount(core.Account{Platform: core.PlatformRain, LoginState: "failed", LastError: s.rainError})
 			s.rainMu.Unlock()
+			s.queueSync()
 			return
 		}
 		if err = s.Engine.SetAccount(core.Account{Platform: core.PlatformRain, LoginState: "logged_in"}); err != nil {
 			s.rainState, s.rainError = "failed", "登录状态保存失败"
 			s.rainMu.Unlock()
+			// The new session may already be in the vault; a sync will validate
+			// it or record the failure.
+			s.queueSync()
 			return
 		}
 		s.rainState, s.rainError = "logged_in", ""

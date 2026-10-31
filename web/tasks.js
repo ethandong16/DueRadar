@@ -5,9 +5,21 @@
   else root.DueRadarTasks = behavior;
 })(globalThis, function () {
   "use strict";
+  // Go marshals time.Time with RFC3339Nano. The ECMAScript date format allows
+  // at most three fractional digits, and Safari rejects longer fractions
+  // outright, so trim them before parsing. The lost precision is below one
+  // millisecond and cannot affect deadline ordering or display.
+  const fraction = /\.(\d+)(?=[Zz+-])/;
+  function parseTime(value) {
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === "number") return value;
+    if (typeof value !== "string") return NaN;
+    const milliseconds = value.replace(fraction, (_, digits) => "." + digits.slice(0, 3).padEnd(3, "0"));
+    return Date.parse(milliseconds);
+  }
   function deadline(task) {
     const value = task.due_at ?? task.end_at;
-    const date = value ? Date.parse(value) : NaN;
+    const date = value ? parseTime(value) : NaN;
     return Number.isFinite(date) ? date : null;
   }
   // Academic year starts in September; February through August still belong to
@@ -125,5 +137,38 @@
       return url.protocol === "https:" && !url.username && !url.password ? url.href : null;
     } catch { return null; }
   }
-  return { deadline, timeGroup, select, paginate, safeSource, semester, scopeInfo, scopeTasks };
+  // Compact age for the sync readout: fresh data should read as "just now",
+  // not as an absolute timestamp that the user has to compare with the clock.
+  function ageLabel(value, now = Date.now()) {
+    const at = parseTime(value);
+    if (!Number.isFinite(at)) return null;
+    const minutes = Math.floor(Math.max(0, now - at) / 60000);
+    if (minutes < 1) return "刚刚";
+    if (minutes < 60) return `${minutes} 分钟前`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} 小时前`;
+    return `${Math.floor(hours / 24)} 天前`;
+  }
+  // Human-readable reminder lead, matching the units used by the settings form.
+  function leadLabel(minutes) {
+    const value = Number(minutes);
+    if (!Number.isFinite(value) || value <= 0) return "";
+    if (value % 1440 === 0) return `${value / 1440} 天`;
+    if (value % 60 === 0) return `${value / 60} 小时`;
+    return `${value} 分钟`;
+  }
+  // The next reminder still queued for a task, ignoring discovery and fault
+  // events so the overview previews an actual scheduled reminder.
+  const scheduledKinds = new Set(["deadline", "video_deadline", "exam_start"]);
+  function nextReminder(events, taskId) {
+    let best = null;
+    for (const event of events || []) {
+      if (event.task_id !== taskId || !scheduledKinds.has(event.kind) || !["pending", "sending"].includes(event.status)) continue;
+      const at = parseTime(event.due_at);
+      if (!Number.isFinite(at)) continue;
+      if (!best || at < best.at) best = { at, minutes: Number(event.minutes_before) || 0, kind: event.kind };
+    }
+    return best;
+  }
+  return { parseTime, deadline, timeGroup, select, paginate, safeSource, semester, scopeInfo, scopeTasks, ageLabel, leadLabel, nextReminder };
 });

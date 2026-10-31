@@ -122,12 +122,7 @@ func (s *Server) Handler(files fs.FS) http.Handler {
 	mux.HandleFunc("GET /api/accounts/rain/assist/{id}/helper", s.rainAssistHelperStatus)
 	mux.HandleFunc("POST /api/accounts/rain/assist/{id}/session", s.uploadRainAssist)
 	mux.HandleFunc("GET /api/events", s.protected(func(w http.ResponseWriter, r *http.Request) {
-		events := s.Engine.Snapshot().Events
-		sort.SliceStable(events, func(i, j int) bool { return events[i].CreatedAt.After(events[j].CreatedAt) })
-		if len(events) > 200 {
-			events = events[:200]
-		}
-		jsonResponse(w, 200, events)
+		jsonResponse(w, 200, trimEvents(s.Engine.Snapshot().Events, 200))
 	}))
 	mux.HandleFunc("GET /api/status", s.protected(s.status))
 	mux.HandleFunc("POST /api/sync", s.protected(func(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +142,7 @@ func (s *Server) Handler(files fs.FS) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("Cache-Control", "no-store")
 		if r.Method != "GET" && r.Method != "HEAD" {
@@ -176,6 +172,31 @@ func jsonResponse(w http.ResponseWriter, status int, v any) {
 func fail(w http.ResponseWriter, status int, message string) {
 	jsonResponse(w, status, map[string]string{"error": message})
 }
+
+// trimEvents bounds the API payload without dropping reminders that are still
+// scheduled to send. Terminal history is ordered newest-first behind them; an
+// older pending event must not disappear merely because newer deliveries exist.
+func trimEvents(events []core.Event, limit int) []core.Event {
+	active := make([]core.Event, 0, len(events))
+	history := make([]core.Event, 0, len(events))
+	for _, event := range events {
+		if event.Status == "pending" || event.Status == "sending" {
+			active = append(active, event)
+		} else {
+			history = append(history, event)
+		}
+	}
+	sort.SliceStable(active, func(i, j int) bool { return active[i].DueAt.Before(active[j].DueAt) })
+	sort.SliceStable(history, func(i, j int) bool { return history[i].CreatedAt.After(history[j].CreatedAt) })
+	if len(active) >= limit {
+		return active[:limit]
+	}
+	trimmed := append(active, history...)
+	if len(trimmed) > limit {
+		trimmed = trimmed[:limit]
+	}
+	return trimmed
+}
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
 		fail(w, 415, "请使用 application/json")
@@ -202,31 +223,36 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	now := time.Now()
-	s.mu.Lock()
-	for k, a := range s.attempts {
-		if now.Sub(a.since) > 15*time.Minute {
-			delete(s.attempts, k)
-		}
-	}
-	a := s.attempts[ip]
-	if a.count >= 10 || len(s.attempts) >= 2048 {
-		s.mu.Unlock()
-		fail(w, 429, "尝试次数过多，请 15 分钟后重试")
-		return
-	}
-	if a.since.IsZero() {
-		a.since = now
-	}
-	a.count++
-	s.attempts[ip] = a
-	s.mu.Unlock()
 	hash := sha256.Sum256([]byte(input.Password))
 	if subtle.ConstantTimeCompare(hash[:], s.password[:]) != 1 {
+		// Count failures only. Checking the limiter before verifying the password
+		// would let anyone who can reach /api/login lock the administrator out by
+		// burning the shared reverse-proxy address's budget with wrong guesses.
+		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		now := time.Now()
+		s.mu.Lock()
+		for k, a := range s.attempts {
+			if now.Sub(a.since) > 15*time.Minute {
+				delete(s.attempts, k)
+			}
+		}
+		a := s.attempts[ip]
+		if a.count >= 10 || len(s.attempts) >= 2048 {
+			s.mu.Unlock()
+			fail(w, 429, "尝试次数过多，请 15 分钟后重试")
+			return
+		}
+		if a.since.IsZero() {
+			a.since = now
+		}
+		a.count++
+		s.attempts[ip] = a
+		s.mu.Unlock()
 		fail(w, 401, "管理密码不正确")
 		return
 	}
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	now := time.Now()
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		fail(w, 500, "会话创建失败")
@@ -323,7 +349,10 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err.Error())
 		return
 	}
-	jsonResponse(w, 200, settings)
+	// Echo what was stored, not the request: UpdateSettings normalizes values
+	// (for example in_class_poll_seconds:0 becomes the default) and a client
+	// comparing this response with a later GET must see the same settings.
+	jsonResponse(w, 200, s.Engine.Snapshot().Settings)
 }
 func (s *Server) getBark(w http.ResponseWriter, r *http.Request) {
 	c := s.Vault.Get()
@@ -385,11 +414,14 @@ func (s *Server) testBark(w http.ResponseWriter, r *http.Request) {
 	s.lastTestAt = &now
 	s.lastTestError = ""
 	if err != nil {
-		s.lastTestError = err.Error()
+		// Transport implementations may include request URLs, response bodies,
+		// or other provider details. Keep those out of both the API response and
+		// the persisted-in-process status shown by GET /api/bark.
+		s.lastTestError = "Bark 测试通知失败，请检查配置及网络"
 	}
 	s.mu.Unlock()
 	if err != nil {
-		fail(w, 502, err.Error())
+		fail(w, 502, "Bark 测试通知失败，请检查配置及网络")
 		return
 	}
 	jsonResponse(w, 200, map[string]string{"message": "Bark 已接受测试通知"})
@@ -586,6 +618,8 @@ func (s *Server) Run(ctx context.Context) {
 	defer stop()
 	s.startJob(func(ctx context.Context) {
 		syncOnce := func() {
+			// Bound terminal history even when no platform is currently bound.
+			_ = s.Engine.Maintain(time.Now())
 			syncCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
 			_ = s.Sync(syncCtx)

@@ -96,6 +96,26 @@ func TestInClassExpiresAfterWindow(t *testing.T) {
 	}
 }
 
+func TestInClassSurvivesTransientTaskSyncFailure(t *testing.T) {
+	engine := testEngine(t)
+	now := time.Date(2026, 10, 22, 2, 0, 0, 0, time.UTC)
+	if err := engine.Sync(PlatformRain, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	// A task-collection failure is not proof that the login expired. The fast
+	// in-class poll may still be working, and its quiz alert is time-sensitive.
+	if err := engine.Fail(PlatformRain, false, "fixture network failure", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.ReportInClass(PlatformRain, []InClassQuiz{quizItem("12")}, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	pending := engine.Pending(now.Add(2*time.Minute + time.Second))
+	if len(pending) != 1 || pending[0].Kind != "in_class" {
+		t.Fatalf("transient sync failure discarded a live quiz alert: %+v", pending)
+	}
+}
+
 func TestInClassBlockedWhileAccountNeedsRevalidation(t *testing.T) {
 	engine := testEngine(t)
 	now := time.Date(2026, 10, 22, 2, 0, 0, 0, time.UTC)

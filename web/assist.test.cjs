@@ -19,7 +19,7 @@ function browser(api) {
   };
   const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
   const flow = source.slice(source.indexOf("  let activeLogin;"), source.indexOf("  function eventTitle("));
-  const context = vm.createContext({ $, api, notify() {}, refreshState: async () => {},
+  const context = vm.createContext({ $, api, DueRadarTasks: require("./tasks.js"), notify() {}, refreshState: async () => {},
     location: { origin: "https://fixture.example" },
     setTimeout(fn) { timer = fn; return fn; }, clearTimeout(fn) { if (timer === fn) timer = null; },
   });
