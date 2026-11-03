@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -615,7 +614,7 @@ func (m *MultiServer) register(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "密码长度需要为 12—1024 字节")
 		return
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := clientIP(r)
 	now := time.Now()
 	m.mu.Lock()
 	if m.stopping {
@@ -722,7 +721,7 @@ func (m *MultiServer) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "账号或密码不正确")
 		return
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := clientIP(r)
 	m.mu.Lock()
 	allowed := m.allowLoginAttemptLocked(ip, time.Now())
 	m.mu.Unlock()

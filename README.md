@@ -73,7 +73,7 @@ systemctl enable --now dueradar
 systemctl status dueradar
 ```
 
-systemd 使用独立动态用户；`StateDirectory=dueradar` 把数据放在 `/var/lib/private/dueradar`，并以 `/var/lib/dueradar` 符号链接暴露。局域网或 Tailscale 访问时，将监听地址改为相应网卡 IP；公网部署使用 HTTPS 反向代理并设置 `DUERADAR_SECURE_COOKIES=true`，并在可信代理配置按真实客户端地址的登录限速及访问控制。反向代理保留原始 Host，应用不信任用户提交的转发地址头；代理后的用户可能共享应用内限速预算。
+systemd 使用独立动态用户；`StateDirectory=dueradar` 把数据放在 `/var/lib/private/dueradar`，并以 `/var/lib/dueradar` 符号链接暴露。局域网或 Tailscale 访问时，将监听地址改为相应网卡 IP；公网部署使用 HTTPS 反向代理并设置 `DUERADAR_SECURE_COOKIES=true`，并在可信代理配置按真实客户端地址的登录限速及访问控制。反向代理保留原始 Host；当请求来自本机、私有网段或 Tailscale 地址（例如本机运行的 cloudflared 隧道）时，应用以 Cloudflare 的 `CF-Connecting-IP` 作为限速来源，来自公网直连的请求一律使用实际对端地址，因此无法伪造。
 
 ## Docker
 
