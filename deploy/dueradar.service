@@ -8,6 +8,8 @@ Type=simple
 DynamicUser=yes
 StateDirectory=dueradar
 WorkingDirectory=/var/lib/dueradar
+# 在环境文件中显式设置 DUERADAR_ALLOW_REGISTRATION；公网 HTTPS 设 DUERADAR_SECURE_COOKIES=true。
+# DUERADAR_ADMIN_PASSWORD 仅用于无用户注册表时创建初始 owner；旧数据首次升级请填写原管理密码。
 EnvironmentFile=/etc/dueradar.env
 Environment=DUERADAR_DATA_DIR=/var/lib/dueradar
 ExecStart=/opt/dueradar/dueradar

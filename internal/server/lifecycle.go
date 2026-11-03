@@ -47,12 +47,38 @@ func (s *Server) startJob(run func(context.Context)) bool {
 	return true
 }
 
+// queueSync coalesces bursts into at most one active and one pending sync.
+// A trigger during a running round is retained so a newly bound credential is
+// always revalidated after an older canceled round unwinds.
 func (s *Server) queueSync() bool {
-	return s.startJob(func(ctx context.Context) {
-		ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		defer cancel()
-		_ = s.Sync(ctx)
-	})
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	if s.stopping || s.lifetime.Err() != nil {
+		return false
+	}
+	s.syncQueued = true
+	if s.syncWorker {
+		return true
+	}
+	s.syncWorker = true
+	s.jobs.Add(1)
+	go func() {
+		defer s.jobs.Done()
+		for {
+			s.lifeMu.Lock()
+			if s.stopping || !s.syncQueued {
+				s.syncWorker = false
+				s.lifeMu.Unlock()
+				return
+			}
+			s.syncQueued = false
+			s.lifeMu.Unlock()
+			// Sync applies its round timeout after acquiring the serialization
+			// gate; waiting for a superseded round must not spend that budget.
+			_ = s.Sync(s.lifetime)
+		}
+	}()
+	return true
 }
 
 func (s *Server) stopBackground() {
@@ -90,10 +116,10 @@ func (s *Server) commitRainSync(ctx context.Context, generation uint64, commit f
 	return commit()
 }
 
-func (s *Server) failRainSync(ctx context.Context, generation uint64, expired bool, message string) error {
+func (s *Server) failRainSync(ctx context.Context, generation uint64, cookie string, expired bool, message string) error {
 	s.rainMu.Lock()
 	defer s.rainMu.Unlock()
-	if s.lifetime.Err() != nil || generation != s.rainGeneration {
+	if s.lifetime.Err() != nil || generation != s.rainGeneration || s.Vault.Get().RainCookie != cookie {
 		return errSupersededLogin
 	}
 	if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
@@ -105,7 +131,7 @@ func (s *Server) failRainSync(ctx context.Context, generation uint64, expired bo
 }
 
 type deliveryOutcome struct {
-	id     string
+	claim  core.Event
 	sent   bool
 	at     time.Time
 	unsent *core.Event
@@ -122,13 +148,15 @@ func (s *Server) persistDelivery() error {
 	if outcome.unsent != nil {
 		err = s.Engine.ReturnUnsent(*outcome.unsent)
 	} else if outcome.sent {
-		err = s.Engine.MarkSent(outcome.id, outcome.at)
+		err = s.Engine.MarkSentClaim(outcome.claim, outcome.at)
 	} else {
-		err = s.Engine.MarkFailed(outcome.id, "通知发送失败", outcome.at)
+		err = s.Engine.MarkFailedClaim(outcome.claim, "通知发送失败", outcome.at)
 	}
-	if err != nil {
+	if err != nil && !errors.Is(err, core.ErrStaleClaim) {
 		return err
 	}
+	// A newer reservation owns this event now. Its state must not be changed
+	// by the late result; unlike an I/O error this cannot be repaired by retrying.
 	s.mu.Lock()
 	if outcome.unsent == nil {
 		s.deliveryAt = &outcome.at

@@ -158,8 +158,13 @@ func pruneEvents(s *State, now time.Time) bool {
 	removed := false
 	for _, ev := range s.Events {
 		if !actionable(ev) && !ev.CreatedAt.IsZero() && ev.CreatedAt.Before(cutoff) {
-			removed = true
-			continue
+			// A recently canceled or exhausted in-flight event can still
+			// receive a valid late outcome. Bound its extra lifetime from the
+			// lease end rather than from the event's original creation.
+			if ev.ClaimState != claimActive || !ev.ClaimUntil.IsZero() && ev.ClaimUntil.Before(cutoff) {
+				removed = true
+				continue
+			}
 		}
 		kept = append(kept, ev)
 	}
@@ -208,6 +213,43 @@ func (e *Engine) SetAccount(a Account) error {
 	})
 }
 
+// ResetPlatformForRebind clears the previous binding's tasks, notification
+// history, deduplication keys, and account metadata in one durable transaction.
+// Removing history allows the new account to reuse platform-local task IDs
+// without inheriting reminders from the previous account. Claim generations
+// remain global so old in-flight results cannot affect new events.
+// Caller must serialize rebinding against sync and in-class polling.
+func (e *Engine) ResetPlatformForRebind(platform string) error {
+	if !validPlatform(platform) {
+		return errors.New("unknown platform")
+	}
+	return e.change(func(s *State) error {
+		kept := s.Tasks[:0]
+		for _, task := range s.Tasks {
+			if task.Platform != platform {
+				kept = append(kept, task)
+			}
+		}
+		s.Tasks = kept
+		events := s.Events[:0]
+		for _, ev := range s.Events {
+			if ev.Platform != platform {
+				events = append(events, ev)
+			}
+		}
+		s.Events = events
+		prefix := platform + "\x00"
+		for key := range s.InClassSeen {
+			if strings.HasPrefix(key, prefix) {
+				delete(s.InClassSeen, key)
+			}
+		}
+		i := accountIndex(s, platform)
+		s.Accounts[i] = Account{Platform: platform, LoginState: "unbound", SyncState: "idle", NeedsRevalidation: true}
+		return nil
+	})
+}
+
 func (e *Engine) RequireRevalidation() error {
 	return e.change(func(s *State) error {
 		for i := range s.Accounts {
@@ -220,6 +262,8 @@ func (e *Engine) RequireRevalidation() error {
 			if s.Events[i].Status == "sending" {
 				s.Events[i].Status = "pending"
 				s.Events[i].NextAttemptAt = nil
+				// Preflight now fails, but a transport already in flight may still
+				// settle this reservation until another claim supersedes it.
 			}
 		}
 		return nil
@@ -548,8 +592,9 @@ func collapseRecovery(s *State, p string, now time.Time) {
 	}
 }
 
-// Pending durably claims events for two minutes. Call MarkSent or MarkFailed
-// after each send. Only an already configured exact 60-minute exam-start or
+// Pending durably claims events for two minutes. Prefer MarkSentClaim or
+// MarkFailedClaim after each send to fence late outcomes from newer claims.
+// Only an already configured exact 60-minute exam-start or
 // 30-minute deadline event bypasses quiet hours, including its delayed retry.
 // Other offsets and discovery/time-change events never inherit urgency.
 func (e *Engine) Pending(now time.Time) []Event {
@@ -593,6 +638,12 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 			continue
 		}
 		if ev.Attempts >= MaxDeliveryAttempts {
+			// This is only an expiry, not a transport outcome. Keep the active
+			// claim so its late success, failure, or known-unsent return can be
+			// reconciled if nobody has superseded it.
+			if ev.ClaimState == claimActive {
+				ev.ClaimPriorError = ev.LastError
+			}
 			ev.Status = "failed"
 			ev.LastError = "通知发送达到重试上限"
 			changed = true
@@ -640,9 +691,19 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 				}
 			}
 		}
+		if s.LastClaimID == ^uint64(0) {
+			return nil, errors.New("delivery claim sequence exhausted")
+		}
+		s.LastClaimID++
+		ev.ClaimID = s.LastClaimID
+		ev.ClaimState = claimActive
+		ev.ClaimPriorError = ""
 		ev.Status = "sending"
 		ev.Attempts++
 		ev.NextAttemptAt = timePtr(now.Add(deliveryLease))
+		// Keep a separate immutable copy after cancellation clears the retry
+		// field. Its bounded retention protects a late transport outcome.
+		ev.ClaimUntil = *ev.NextAttemptAt
 		changed = true
 		claimed := *ev
 		if ev.AnchorAt != nil {
@@ -667,6 +728,8 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 	return result, nil
 }
 
+// MarkSent is the legacy ID-only API. It cannot distinguish a late sender from
+// a newer claim; concurrent senders should use MarkSentClaim instead.
 func (e *Engine) MarkSent(id string, now time.Time) error {
 	return e.change(func(s *State) error {
 		for i := range s.Events {
@@ -678,10 +741,7 @@ func (e *Engine) MarkSent(id string, now time.Time) error {
 				if ev.Status != "sending" && !(ev.Status == "canceled" && ev.Attempts > 0) {
 					return errors.New("event is not claimed")
 				}
-				ev.Status = "sent"
-				ev.SentAt = timePtr(now)
-				ev.NextAttemptAt = nil
-				ev.LastError = ""
+				markSent(ev, now)
 				return nil
 			}
 		}
@@ -689,30 +749,26 @@ func (e *Engine) MarkSent(id string, now time.Time) error {
 	})
 }
 
+// MarkFailed is the legacy ID-only API. It cannot distinguish a late sender
+// from a newer claim; concurrent senders should use MarkFailedClaim instead.
 func (e *Engine) MarkFailed(id string, message string, now time.Time) error {
 	return e.change(func(s *State) error {
 		for i := range s.Events {
 			ev := &s.Events[i]
 			if ev.ID == id {
 				if ev.Status == "canceled" {
+					if ev.ClaimState == claimActive {
+						ev.ClaimState = claimFailed
+						ev.ClaimUntil = time.Time{}
+						ev.ClaimPriorError = ""
+					}
 					return nil
 				}
 				if ev.Status != "sending" {
 					return errors.New("event is not claimed")
 				}
 				_ = message // External transport errors may contain the private Bark key.
-				ev.LastError = "通知发送失败，请检查 Bark 配置及网络"
-				if ev.Attempts >= MaxDeliveryAttempts {
-					ev.Status = "failed"
-					ev.NextAttemptAt = nil
-					return nil
-				}
-				delay := time.Minute * time.Duration(1<<uint(ev.Attempts-1))
-				if delay > 30*time.Minute {
-					delay = 30 * time.Minute
-				}
-				ev.Status = "pending"
-				ev.NextAttemptAt = timePtr(now.Add(delay))
+				markFailed(ev, now)
 				return nil
 			}
 		}

@@ -5,7 +5,9 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     environment:
-      DUERADAR_ADMIN_PASSWORD: ${DUERADAR_ADMIN_PASSWORD:?Set an admin password with at least 12 characters}
+      DUERADAR_ADMIN_PASSWORD: ${DUERADAR_ADMIN_PASSWORD:-}
+      # 从 .env 读取注册策略；请显式设置 true 或 false。
+      DUERADAR_ALLOW_REGISTRATION: ${DUERADAR_ALLOW_REGISTRATION:-}
       DUERADAR_SECURE_COOKIES: ${DUERADAR_SECURE_COOKIES:-false}
     volumes:
       - dueradar-data:/data

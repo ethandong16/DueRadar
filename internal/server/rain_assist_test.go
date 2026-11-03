@@ -324,11 +324,8 @@ func TestRainAssistFailuresNeverClaimSuccess(t *testing.T) {
 			}
 			close(release)
 			eventually(t, func() bool { return assistState(s, flow.ID) == "failed" })
-			if failure != "state" && s.Vault.Get().RainCookie != "original" {
-				t.Fatal("failed validation/persistence replaced original credentials")
-			}
-			if failure == "state" && s.Vault.Get().RainCookie != "validated" {
-				t.Fatal("valid persisted rotation was discarded after state failure")
+			if s.Vault.Get().RainCookie != "original" {
+				t.Fatal("failed validation or pre-rebind reset replaced original credentials")
 			}
 			w := helperRequest(h, "GET", base+"/helper", "", token)
 			if w.Code != 200 || strings.Contains(w.Body.String(), "SECRET_PROVIDER_BODY") || strings.Contains(w.Body.String(), "synthetic-secret") {

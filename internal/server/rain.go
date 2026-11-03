@@ -113,6 +113,14 @@ func (s *Server) startRainLogin(w http.ResponseWriter, r *http.Request) {
 			s.queueSync()
 			return
 		}
+		// A new login may belong to a different platform identity. Remove the
+		// previous identity's tasks and reminders before replacing credentials.
+		if err = s.Engine.ResetPlatformForRebind(core.PlatformRain); err != nil {
+			s.rainState, s.rainError = "failed", "原平台数据清理失败"
+			s.rainMu.Unlock()
+			s.queueSync()
+			return
+		}
 		if err = s.Vault.Update(func(c *vault.Config) error { c.RainCookie = cookie; return nil }); err != nil {
 			s.rainState, s.rainError = "failed", "会话保存失败"
 			_ = s.Engine.SetAccount(core.Account{Platform: core.PlatformRain, LoginState: "failed", LastError: s.rainError})

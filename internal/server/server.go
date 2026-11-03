@@ -72,6 +72,9 @@ type Server struct {
 	lifetimeCancel    context.CancelFunc
 	lifeMu            sync.Mutex
 	stopping          bool
+	runStarted        bool
+	syncQueued        bool
+	syncWorker        bool
 	jobs              sync.WaitGroup
 	startRain         func(context.Context) (*rainFlow, error)
 	newRain           func(string) rainAdapter
@@ -91,6 +94,12 @@ func New(engine *core.Engine, credentials *vault.Vault, password string, demo, s
 }
 
 func (s *Server) Handler(files fs.FS) http.Handler {
+	return s.handler(staticHandler(files))
+}
+
+// handler accepts a shared static handler so a multi-user deployment does not
+// recompress and retain another copy of the web assets for every account.
+func (s *Server) handler(static http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("POST /api/login", s.login)
@@ -137,7 +146,7 @@ func (s *Server) Handler(files fs.FS) http.Handler {
 		jsonResponse(w, 202, map[string]string{"message": "同步已开始，请稍后查看平台结果"})
 	}))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "接口不存在") })
-	mux.Handle("/", staticHandler(files))
+	mux.Handle("/", static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -287,6 +296,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) protected(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// MultiServer authenticates the account once at its outer boundary and
+		// passes an authorized context into this account-local worker. The legacy
+		// single-user Server still uses its own persisted session map in tests and
+		// when constructed directly.
+		if _, ok := r.Context().Value(tenantAuthorizedKey{}).(*tenantAuthorization); ok {
+			next(w, r)
+			return
+		}
 		c, err := r.Cookie("dueradar_session")
 		if err != nil {
 			fail(w, 401, "请先登录管理页面")
@@ -345,7 +362,11 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &settings) {
 		return
 	}
-	if err := s.Engine.UpdateSettings(settings); err != nil {
+	// Serialize the in-class enabled flag with a live poll's final commit.
+	s.rainMu.Lock()
+	err := s.Engine.UpdateSettings(settings)
+	s.rainMu.Unlock()
+	if err != nil {
 		fail(w, 400, err.Error())
 		return
 	}
@@ -461,6 +482,8 @@ func (s *Server) Sync(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	ctx, roundCancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer roundCancel()
 	if s.Demo {
 		return s.seedDemo(time.Now())
 	}
@@ -505,22 +528,25 @@ func (s *Server) syncRain(ctx context.Context) error {
 	}
 	adapter := s.newRain(cookie)
 	if err := adapter.Validate(ctx); err != nil {
-		_ = s.failRainSync(ctx, generation, errors.Is(err, platform.ErrSessionExpired), "登录验证失败")
+		_ = s.failRainSync(ctx, generation, cookie, errors.Is(err, platform.ErrSessionExpired), "登录验证失败")
 		return err
 	}
 	if err := s.commitRainSync(ctx, generation, func() error {
+		if s.Vault.Get().RainCookie != cookie {
+			return errSupersededLogin
+		}
 		return s.Engine.SetAccount(core.Account{Platform: core.PlatformRain, LoginState: "logged_in"})
 	}); err != nil {
 		return err
 	}
 	tasks, err := adapter.Tasks(ctx)
 	if err != nil {
-		_ = s.failRainSync(ctx, generation, errors.Is(err, platform.ErrSessionExpired), "任务采集失败")
+		_ = s.failRainSync(ctx, generation, cookie, errors.Is(err, platform.ErrSessionExpired), "任务采集失败")
 		return err
 	}
 	updated, err := sessionCredentials(adapter, cookie)
 	if err != nil {
-		_ = s.failRainSync(ctx, generation, false, "会话续期读取失败")
+		_ = s.failRainSync(ctx, generation, cookie, false, "会话续期读取失败")
 		return err
 	}
 	// Keep the generation lock across both writes. Even an unchanged export
@@ -548,7 +574,7 @@ func (s *Server) syncRain(ctx context.Context) error {
 		return s.Engine.Sync(core.PlatformRain, tasks, time.Now())
 	})
 	if err != nil && !errors.Is(err, errSupersededLogin) {
-		_ = s.failRainSync(ctx, generation, false, "同步结果保存失败")
+		_ = s.failRainSync(ctx, generation, cookie, false, "同步结果保存失败")
 	}
 	return err
 }
@@ -568,6 +594,12 @@ func sessionCredentials(adapter rainAdapter, original string) (string, error) {
 }
 
 func (s *Server) Deliver(ctx context.Context) {
+	s.deliverWithGuard(ctx, nil)
+}
+
+// deliverWithGuard lets a caller fence an immediate delivery against a changed
+// provider generation. The guard is called under notifyMu, never during I/O.
+func (s *Server) deliverWithGuard(ctx context.Context, valid func() bool) {
 	if s.Demo {
 		return
 	}
@@ -580,7 +612,7 @@ func (s *Server) Deliver(ctx context.Context) {
 		}
 	}
 	for {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || valid != nil && !valid() {
 			return
 		}
 		c := s.Vault.Get()
@@ -597,7 +629,7 @@ func (s *Server) Deliver(ctx context.Context) {
 			return
 		}
 		event := events[0]
-		if ctx.Err() != nil || !s.Engine.ClaimStillValid(event.ID, time.Now()) {
+		if ctx.Err() != nil || !s.Engine.ClaimStillValidClaim(event, time.Now()) || valid != nil && !valid() {
 			s.deliveryResult = &deliveryOutcome{unsent: &event}
 			if err := s.persistDelivery(); err != nil {
 				s.setDeliveryError("通知结果保存失败，发送已暂停；请检查数据目录")
@@ -606,7 +638,7 @@ func (s *Server) Deliver(ctx context.Context) {
 			continue
 		}
 		err = s.sendBark(ctx, c.BarkURL, c.BarkKey, event.Title, event.Body)
-		s.deliveryResult = &deliveryOutcome{id: event.ID, sent: err == nil, at: time.Now()}
+		s.deliveryResult = &deliveryOutcome{claim: event, sent: err == nil, at: time.Now()}
 		if persistErr := s.persistDelivery(); persistErr != nil {
 			s.setDeliveryError("通知结果保存失败，发送已暂停；请检查数据目录")
 			return
@@ -614,15 +646,20 @@ func (s *Server) Deliver(ctx context.Context) {
 	}
 }
 func (s *Server) Run(ctx context.Context) {
+	s.lifeMu.Lock()
+	if s.runStarted || s.stopping {
+		s.lifeMu.Unlock()
+		return
+	}
+	s.runStarted = true
+	s.lifeMu.Unlock()
 	stop := context.AfterFunc(ctx, s.stopBackground)
 	defer stop()
 	s.startJob(func(ctx context.Context) {
 		syncOnce := func() {
 			// Bound terminal history even when no platform is currently bound.
 			_ = s.Engine.Maintain(time.Now())
-			syncCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			defer cancel()
-			_ = s.Sync(syncCtx)
+			s.queueSync()
 		}
 		syncOnce()
 		ticker := time.NewTicker(15 * time.Minute)
@@ -650,6 +687,10 @@ func (s *Server) Run(ctx context.Context) {
 	})
 	s.startJob(s.runInClass)
 	<-s.lifetime.Done()
+	// The lifetime cancellation stops the ticker loops, but a platform request
+	// or final durable delivery may still be unwinding. Keep the worker alive
+	// until every owned job has completed its last persistence operation.
+	s.jobs.Wait()
 }
 
 func (s *Server) seedDemo(now time.Time) error {

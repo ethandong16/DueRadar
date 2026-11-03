@@ -110,13 +110,22 @@ func (s *Server) startRainAssist(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "服务正在停止")
 		return
 	}
-	// Close the protected-handler/logout race before associating the flow.
-	s.mu.Lock()
-	owner, exists := s.sessions[sessionKey(admin.Value)]
-	s.mu.Unlock()
-	if !exists || !owner.expires.After(time.Now()) {
-		fail(w, 401, "管理会话已过期，请重新登录")
-		return
+	// Recheck while holding rainMu. Logout removes the session before acquiring
+	// rainMu to cancel its flow, so it either prevents creation or cancels the
+	// newly created flow before returning.
+	if auth, ok := r.Context().Value(tenantAuthorizedKey{}).(*tenantAuthorization); ok {
+		if !auth.sessionValid(admin.Value) {
+			fail(w, 401, "管理会话已过期，请重新登录")
+			return
+		}
+	} else {
+		s.mu.Lock()
+		owner, exists := s.sessions[sessionKey(admin.Value)]
+		s.mu.Unlock()
+		if !exists || !owner.expires.After(time.Now()) {
+			fail(w, 401, "管理会话已过期，请重新登录")
+			return
+		}
 	}
 	now := time.Now()
 	for key, flow := range s.rainAssists {
@@ -227,7 +236,7 @@ func (s *Server) rainAssistStatus(w http.ResponseWriter, r *http.Request) {
 	s.rainMu.Lock()
 	defer s.rainMu.Unlock()
 	flow := s.rainAssists[r.PathValue("id")]
-	if flow == nil {
+	if flow == nil || !assistOwnedByRequest(flow, r) {
 		fail(w, 404, "配对不存在")
 		return
 	}
@@ -235,11 +244,20 @@ func (s *Server) rainAssistStatus(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, flow.status())
 }
 
+func assistOwnedByRequest(flow *rainAssist, r *http.Request) bool {
+	cookie, err := r.Cookie("dueradar_session")
+	if err != nil {
+		return false
+	}
+	owner := sha256.Sum256([]byte(cookie.Value))
+	return subtle.ConstantTimeCompare(owner[:], flow.owner[:]) == 1
+}
+
 func (s *Server) cancelRainAssist(w http.ResponseWriter, r *http.Request) {
 	s.rainMu.Lock()
 	defer s.rainMu.Unlock()
 	flow := s.rainAssists[r.PathValue("id")]
-	if flow == nil {
+	if flow == nil || !assistOwnedByRequest(flow, r) {
 		fail(w, 404, "配对不存在")
 		return
 	}
@@ -248,6 +266,17 @@ func (s *Server) cancelRainAssist(w http.ResponseWriter, r *http.Request) {
 		s.finishRainAssistLocked(flow, "canceled", "")
 	}
 	jsonResponse(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) HandlesRainAssist(id string) bool {
+	s.rainMu.Lock()
+	defer s.rainMu.Unlock()
+	flow := s.rainAssists[id]
+	return flow != nil && flow.expires.After(time.Now())
+}
+
+func (s *Server) CancelRainAssistForSession(token string) {
+	s.cancelRainAssistOwner(token)
 }
 
 func (s *Server) cancelRainAssistOwner(token string) {
@@ -372,6 +401,12 @@ func (s *Server) validateRainAssist(flow *rainAssist, cookie string) {
 	}
 	if err != nil || ctx.Err() != nil {
 		s.finishRainAssistLocked(flow, "failed", "官方会话验证未完成，请重新配对")
+		return
+	}
+	// Browser-assisted login may replace the platform identity. Discard old
+	// Rain data before saving the newly validated credentials.
+	if err := s.Engine.ResetPlatformForRebind(core.PlatformRain); err != nil {
+		s.finishRainAssistLocked(flow, "failed", "原平台数据清理失败")
 		return
 	}
 	if err := s.Vault.Update(func(c *vault.Config) error {

@@ -114,6 +114,14 @@ func (s *Server) startZhidaoLogin(w http.ResponseWriter, r *http.Request) {
 			s.queueSync()
 			return
 		}
+		// A scanned identity may differ from the prior platform account; never
+		// mix its tasks or reminders with the newly validated session.
+		if err = s.Engine.ResetPlatformForRebind(core.PlatformZhidaoCampus); err != nil {
+			s.zhidaoState, s.zhidaoError = "failed", "原平台数据清理失败"
+			s.zhidaoMu.Unlock()
+			s.queueSync()
+			return
+		}
 		if err = s.Vault.Update(func(c *vault.Config) error { c.ZhidaoSession = cookie; return nil }); err != nil {
 			s.zhidaoState, s.zhidaoError = "failed", "会话保存失败"
 			_ = s.Engine.SetAccount(core.Account{Platform: core.PlatformZhidaoCampus, LoginState: "failed", LastError: s.zhidaoError})

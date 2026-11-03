@@ -14,10 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ethandong16/due-radar/internal/core"
 	"github.com/ethandong16/due-radar/internal/instance"
 	"github.com/ethandong16/due-radar/internal/server"
-	"github.com/ethandong16/due-radar/internal/vault"
 	"github.com/ethandong16/due-radar/web"
 )
 
@@ -56,36 +54,18 @@ func main() {
 	if *demo {
 		*dir = filepath.Join(*dir, "demo")
 	}
-	if len(os.Getenv("DUERADAR_ADMIN_PASSWORD")) < 12 {
-		log.Fatal("set DUERADAR_ADMIN_PASSWORD to a password of at least 12 characters")
-	}
 	owner, err := instance.Acquire(*dir)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer owner.Close()
-	engine, err := core.Open(filepath.Join(*dir, "state.json"))
+	allowRegistration := os.Getenv("DUERADAR_ALLOW_REGISTRATION") != "false"
+	app, err := server.OpenMulti(*dir, os.Getenv("DUERADAR_ADMIN_PASSWORD"), *secure, allowRegistration, *demo)
 	if err != nil {
 		log.Fatal(err)
-	}
-	credentials, err := vault.Open(*dir)
-	if err != nil {
-		log.Fatal(err)
-	}
-	app, err := server.New(engine, credentials, os.Getenv("DUERADAR_ADMIN_PASSWORD"), *demo, *secure)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := app.EnableSessionPersistence(*dir); err != nil {
-		log.Printf("session persistence disabled: %v", err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if *demo {
-		if err := app.Sync(ctx); err != nil {
-			log.Fatal(err)
-		}
-	}
 	httpServer := &http.Server{Addr: *listen, Handler: app.Handler(web.Files), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	go app.Run(ctx)
 	shutdownDone := make(chan struct{})

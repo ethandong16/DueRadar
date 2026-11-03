@@ -85,68 +85,81 @@ func (s *Server) runInClass(ctx context.Context) {
 	}
 }
 
+// Rain's binding and renewal paths also hold rainMu while changing its cookie.
+func (s *Server) inClassBindingCurrentLocked(ctx context.Context, generation uint64, cookie string) bool {
+	return ctx.Err() == nil && s.lifetime.Err() == nil &&
+		generation == s.rainGeneration && s.rainState != "initializing" && s.rainState != "waiting" &&
+		s.Vault.Get().RainCookie == cookie
+}
+
+func (s *Server) inClassCurrentLocked(ctx context.Context, generation uint64, cookie string) bool {
+	return s.inClassBindingCurrentLocked(ctx, generation, cookie) && s.Engine.Snapshot().Settings.InClassEnabled
+}
+
+func (s *Server) inClassCurrent(ctx context.Context, generation uint64, cookie string) bool {
+	s.rainMu.Lock()
+	defer s.rainMu.Unlock()
+	return s.inClassCurrentLocked(ctx, generation, cookie)
+}
+
 func (s *Server) checkInClass(parent context.Context) {
 	if s.Demo {
 		return
 	}
-	settings := s.Engine.Snapshot().Settings
-	if !settings.InClassEnabled {
-		s.setInClassStatus(func(status *inClassStatus) { *status = inClassStatus{} })
-		return
-	}
-	cookie := s.Vault.Get().RainCookie
-	if cookie == "" {
-		return
-	}
+	operationCtx, stop := s.operationContext(parent)
+	defer stop()
 	s.rainMu.Lock()
+	if operationCtx.Err() != nil || s.lifetime.Err() != nil {
+		s.rainMu.Unlock()
+		return
+	}
+	settings := s.Engine.Snapshot().Settings
+	generation, cookie := s.rainGeneration, s.Vault.Get().RainCookie
+	if !settings.InClassEnabled {
+		if operationCtx.Err() == nil && s.lifetime.Err() == nil && !s.Engine.Snapshot().Settings.InClassEnabled {
+			s.setInClassStatus(func(status *inClassStatus) { *status = inClassStatus{} })
+		}
+		s.rainMu.Unlock()
+		return
+	}
 	busy := s.rainState == "initializing" || s.rainState == "waiting"
 	s.rainMu.Unlock()
-	if busy {
+	if busy || cookie == "" || operationCtx.Err() != nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(operationCtx, inClassPollTimeout)
+	defer cancel()
 	adapter := s.newRain(cookie)
 	live, ok := adapter.(inClassAdapter)
-	if !ok {
+	if !ok || !s.inClassCurrent(ctx, generation, cookie) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(parent, inClassPollTimeout)
-	defer cancel()
 
-	lessons, err := live.LiveLessons(ctx)
-	if err != nil {
-		s.setInClassStatus(func(status *inClassStatus) {
-			status.LastCheckAt = time.Now()
-			status.Lessons = nil
-			status.Error = "读取在课状态失败"
-		})
-		return
-	}
-	// The platform may rotate cookies on any request. Persist a renewal now so
-	// the fast loop cannot leave the stored session behind the live one.
-	if updated, err := sessionCredentials(adapter, cookie); err == nil && updated != cookie {
-		_ = s.Vault.Update(func(c *vault.Config) error {
-			if c.RainCookie == cookie {
-				c.RainCookie = updated
-			}
-			return nil
-		})
-	}
+	lessons, lessonErr := live.LiveLessons(ctx)
 	now := time.Now()
-	if len(lessons) == 0 {
-		s.setInClassStatus(func(status *inClassStatus) {
-			status.LastCheckAt = now
-			status.Lessons = nil
-			status.Error = ""
-		})
-		return
-	}
-
 	items := make([]core.InClassQuiz, 0, 8)
 	names := make([]string, 0, len(lessons))
 	var firstErr string
+	interrupted := !s.inClassCurrent(ctx, generation, cookie)
+	if lessonErr != nil {
+		// Some servers rotate a session even on an error response. Export it
+		// below, but never process a partial lesson list.
+		lessons = nil
+		firstErr = "读取在课状态失败"
+	}
 	for _, lesson := range lessons {
+		// A later re-enable must not make an interrupted poll's partial result
+		// look complete. Still export any issued renewal below.
+		if interrupted || !s.inClassCurrent(ctx, generation, cookie) {
+			interrupted = true
+			break
+		}
 		names = append(names, lesson.CourseName)
 		activities, err := live.LiveActivities(ctx, lesson.ClassroomID)
+		if !s.inClassCurrent(ctx, generation, cookie) {
+			interrupted = true
+			break
+		}
 		if err != nil {
 			if firstErr == "" {
 				firstErr = "读取课堂活动失败"
@@ -184,7 +197,15 @@ func (s *Server) checkInClass(parent context.Context) {
 		// Teacher and assistant classrooms expose the activity feed but reject
 		// the student quick-answer endpoint, so only student lessons are read.
 		if quick, ok := live.(inClassQuickAnswerAdapter); ok && lesson.LessonID != "" && lesson.IsStudent() {
+			if !s.inClassCurrent(ctx, generation, cookie) {
+				interrupted = true
+				break
+			}
 			answers, quickErr := quick.LiveQuickAnswers(ctx, lesson.LessonID)
+			if !s.inClassCurrent(ctx, generation, cookie) {
+				interrupted = true
+				break
+			}
 			if quickErr != nil {
 				if firstErr == "" {
 					firstErr = "读取课堂答题失败"
@@ -210,13 +231,64 @@ func (s *Server) checkInClass(parent context.Context) {
 			}
 		}
 	}
-	added, err := s.Engine.ReportInClass(core.PlatformRain, items, now)
-	if err != nil {
+	// Every request, including an unsuccessful one, can rotate a cookie. Export
+	// only after the final request; never expose provider diagnostics in status.
+	// Finish that renewal even if monitoring was disabled during a request.
+	updated, exportErr := sessionCredentials(adapter, cookie)
+	s.rainMu.Lock()
+	if !s.inClassBindingCurrentLocked(ctx, generation, cookie) {
+		s.rainMu.Unlock()
+		return
+	}
+	if exportErr == nil && updated != cookie {
+		exportErr = s.Vault.Update(func(c *vault.Config) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := s.lifetime.Err(); err != nil {
+				return err
+			}
+			if c.RainCookie != cookie {
+				return errSupersededLogin
+			}
+			c.RainCookie = updated
+			return nil
+		})
+		if exportErr == nil {
+			cookie = updated
+			// Only an overlapping full sync needs a follow-up: routinely syncing
+			// after every live cookie rotation would defeat the 15-minute cadence.
+			if s.rainSyncCancel != nil {
+				s.queueSync()
+			}
+		}
+	}
+	// Do not publish observations if the current session could not be saved.
+	if interrupted || !s.inClassCurrentLocked(ctx, generation, cookie) {
+		s.rainMu.Unlock()
+		return
+	}
+	if exportErr != nil {
 		s.setInClassStatus(func(status *inClassStatus) {
 			status.LastCheckAt = now
-			status.Lessons = names
-			status.Error = "课上答题记录保存失败"
+			status.Lessons = nil
+			status.Error = "课上会话续期保存失败"
 		})
+		s.rainMu.Unlock()
+		return
+	}
+	added := 0
+	if lessonErr == nil && len(lessons) > 0 {
+		var err error
+		added, err = s.Engine.ReportInClass(core.PlatformRain, items, now)
+		if err != nil {
+			firstErr = "课上答题记录保存失败"
+		}
+	}
+	// Cancellation or a concurrent settings change during disk persistence
+	// must not result in a subsequent status update or immediate delivery.
+	if !s.inClassCurrentLocked(ctx, generation, cookie) {
+		s.rainMu.Unlock()
 		return
 	}
 	s.setInClassStatus(func(status *inClassStatus) {
@@ -229,13 +301,19 @@ func (s *Server) checkInClass(parent context.Context) {
 			status.LastQuiz = latestQuizTitle(items)
 		}
 	})
+	s.rainMu.Unlock()
 	if added > 0 {
-		// Send immediately instead of waiting for the next delivery tick. The
-		// poll deadline must not abort an in-flight push.
-		deliverCtx, cancel := context.WithTimeout(parent, 90*time.Second)
-		s.Deliver(deliverCtx)
-		cancel()
+		s.deliverInClass(operationCtx, generation, cookie)
 	}
+}
+
+// Revalidate after the shared delivery gate, before claims and transport, but
+// never hold rainMu over network I/O. An already-started attempt cannot be
+// retracted; independently scheduled delivery has its own validity checks.
+func (s *Server) deliverInClass(parent context.Context, generation uint64, cookie string) {
+	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
+	defer cancel()
+	s.deliverWithGuard(ctx, func() bool { return s.inClassCurrent(ctx, generation, cookie) })
 }
 
 func inClassQuickAnswerBody(lesson platform.LiveLesson) string {

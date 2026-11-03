@@ -78,6 +78,11 @@ type Event struct {
 	AnchorAt      *time.Time `json:"anchor_at,omitempty"`
 	MinutesBefore int        `json:"minutes_before,omitempty"`
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
+	// ClaimID identifies the last durable reservation, not the event itself.
+	ClaimID         uint64    `json:"claim_id,omitempty"`
+	ClaimState      string    `json:"claim_state,omitempty"`
+	ClaimUntil      time.Time `json:"claim_until,omitzero"`
+	ClaimPriorError string    `json:"claim_prior_error,omitempty"`
 }
 
 type State struct {
@@ -86,6 +91,8 @@ type State struct {
 	Events   []Event   `json:"events"`
 	Accounts []Account `json:"accounts"`
 	Settings Settings  `json:"settings"`
+	// LastClaimID is global so event replacement and pruning cannot reuse a claim.
+	LastClaimID uint64 `json:"last_claim_id,omitempty"`
 	// InClassSeen records already-handled in-class activities so a restart or a
 	// repeated poll cannot notify the same quiz twice. Values are detection times
 	// and are pruned after a week.

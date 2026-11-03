@@ -19,6 +19,8 @@
   let taskPage = 1;
   let toastTimer;
   let authenticated = false;
+  let currentUser = null;
+  let authMode = "login";
   let authGeneration = 0;
   let refreshJob = null;
   let settingsDirty = false;
@@ -96,31 +98,51 @@
   function showLogin(message = "") {
     authGeneration++;
     authenticated = false;
+    currentUser = null;
     state = null;
     settingsDirty = false;
     barkDirty = false;
     $("bark-key").value = "";
+    $("login-username").value = "";
+    $("login-password").value = "";
+    $("login-password-confirm").value = "";
+    $("user-identity").hidden = true;
+    $("first-setup").hidden = true;
     clearActiveLogin();
     $("boot").hidden = true;
     $("app").hidden = true;
     $("login-screen").hidden = false;
     $("login-error").textContent = message;
-    $("login-password").focus();
+    $("login-username").focus();
   }
-  async function api(path, method = "GET", body) {
+  function setAuthMode(mode) {
+    authMode = mode === "register" ? "register" : "login";
+    const registering = authMode === "register";
+    $("auth-title").textContent = registering ? "创建账号" : "登录";
+    $("auth-hint").textContent = registering ? "为这台 DueRadar 实例创建你的独立账号。" : "登录你的 DueRadar 账号，进入这台设备上的任务雷达。";
+    $("auth-submit").firstChild.textContent = registering ? "创建并进入任务总览 " : "进入任务总览 ";
+    $("password-confirm-wrap").hidden = !registering;
+    $("login-password").autocomplete = registering ? "new-password" : "current-password";
+    $("login-password-confirm").required = registering;
+    [[$("auth-login-mode"), !registering], [$("auth-register-mode"), registering]].forEach(([button, active]) => { button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active)); });
+    $("login-error").textContent = "";
+    $("login-username").focus();
+  }
+  async function api(path, method = "GET", body, accountID = currentUser?.id) {
     const generation = authGeneration;
     const stale = () => Object.assign(new Error("会话已切换。"), { name: "StaleSessionError" });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20000);
     try {
-      const response = await fetch(path, { method, credentials: "same-origin", cache: "no-store", headers: { ...(method === "GET" ? {} : { "X-DueRadar": "1" }), ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal });
+      const response = await fetch(path, { method, credentials: "same-origin", cache: "no-store", headers: { ...(method === "GET" ? {} : { "X-DueRadar": "1" }), ...(accountID && !["/api/login", "/api/register", "/api/session"].includes(path) ? { "X-DueRadar-Account": accountID } : {}), ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal });
       const contentType = response.headers.get("content-type") || "";
       const result = contentType.includes("application/json") ? await response.json() : { message: (await response.text()).slice(0, 300) };
       if (generation !== authGeneration) throw stale();
       if (!response.ok) {
         // Only call it an expired session if the user had actually signed in;
         // the first /api/session probe of a fresh visit also returns 401.
-        if (response.status === 401 && path !== "/api/login") showLogin(authenticated ? "管理会话已过期，请重新登录。" : "");
+        if (response.status === 401 && !["/api/login", "/api/register"].includes(path)) showLogin(authenticated ? "管理会话已过期，请重新登录。" : "");
+        if (response.status === 409 && result.error === "登录账号已切换，请重新加载") showLogin("登录账号已在其他页面切换，请重新登录。");
         throw new Error(result.error || result.message || `请求失败（${response.status}）`);
       }
       return result;
@@ -281,6 +303,7 @@
       for (const [label, mapping, value] of [["账号状态", loginStatuses, platform.login_status], ["同步状态", syncStatuses, platform.sync_status]]) { const row = node("div", "platform-status"); row.append(node("span", "", label), badge(...cleanStatus(mapping, value))); card.append(row); }
       card.append(node("p", "platform-message", platform.message || "待验证"));
       card.append(node("p", "platform-date", `最近成功同步：${timestamp(platform.last_success) ? formatDate(platform.last_success) : "尚无成功记录"}`));
+      if (["rain", "zhidao_campus"].includes(platform.id) && !state.demo) card.append(node("p", "platform-date", "重新绑定成功后，将清除该平台旧任务与通知记录，再同步新账号的数据。"));
       if (Number(platform.failures) > 0) card.append(node("p", "platform-date", `连续失败：${Number(platform.failures)} 轮`));
       if (["rain", "zhidao_campus"].includes(platform.id) && platform.ready && state.runtime && !state.demo) {
         const bind = node("button", "button primary", platform.login_status === "logged_in" ? "重新扫码绑定" : (platform.id === "rain" ? "微信扫码绑定" : "知到 APP 扫码绑定"));
@@ -523,6 +546,24 @@
       $("runtime-grid").append(card);
     });
     $("version").textContent = runtime.version ? `· ${runtime.version}` : "";
+    const identity = currentUser || state.user;
+    $("user-identity").hidden = !identity;
+    if (identity) {
+      const name = identity.username || "DueRadar 用户";
+      $("user-name").textContent = name;
+      $("user-name").title = name;
+      $("user-avatar").textContent = name.slice(0, 1).toUpperCase();
+    }
+    const setup = state.setup;
+    $("first-setup").hidden = !setup?.required || state.demo;
+    if (setup?.required && !state.demo) {
+      const steps = [];
+      if (!setup.platforms_bound) steps.push({ label: "绑定雨课堂或知到账号", view: "accounts" });
+      if (!setup.bark_configured) steps.push({ label: "配置 Bark 通知并发送测试", view: "settings" });
+      $("first-setup-summary").textContent = "每个 DueRadar 账号拥有独立的平台会话、任务和通知设置。";
+      const list = $("first-setup-steps"); list.replaceChildren();
+      steps.forEach((step, index) => { const item = node("li", "setup-card__step"); const button = node("button", "text-button", `${index + 1}. ${step.label} →`); button.type = "button"; button.addEventListener("click", () => changeView(step.view)); item.append(button); list.append(item); });
+    }
     try {
       const zone = settings.timezone || "Asia/Shanghai";
       const day = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", timeZone: zone }).format(new Date()).replace(/[/-]/g, ".");
@@ -556,11 +597,19 @@
         do {
           job.queued = false;
           try {
+            if (!authenticated && !currentUser) { settingsDirty = false; barkDirty = false; }
             // Authenticate before parallel reads. A queued refresh starts after
             // this pass, so a save never joins a snapshot taken before its write.
-            await api("/api/session");
+            const session = await api("/api/session");
             if (generation !== authGeneration) return false;
-            const snapshot = { tasks: [], events: [], platforms: [], settings: null, bark: null, runtime: null, demo: false, ...state };
+            if (currentUser?.id && session.user?.id && currentUser.id !== session.user.id) {
+              showLogin("登录账号已在其他页面切换，请重新登录。");
+              return false;
+            }
+            currentUser = session.user || currentUser;
+            const snapshot = { tasks: [], events: [], platforms: [], settings: null, bark: null, runtime: null, demo: false, user: session.user || currentUser, setup: session.setup || null, ...state };
+            snapshot.user = session.user || currentUser;
+            snapshot.setup = session.setup || null;
             const sections = { tasks: "任务", events: "通知记录", accounts: "平台账号", settings: "提醒设置", bark: "Bark 配置", status: "运行状态" };
             const pending = new Set(Object.keys(sections));
             const errors = new Map();
@@ -569,6 +618,7 @@
               if (generation !== authGeneration || job.queued || !tasksReady) return;
               state = { ...snapshot };
               authenticated = true;
+              currentUser = snapshot.user || currentUser;
               $("boot").hidden = true; $("login-screen").hidden = true; $("app").hidden = false;
               // Errors go to the alert region and are only rewritten when the
               // text changes, so a persistent failure is announced once rather
@@ -640,21 +690,26 @@
   $("task-next").addEventListener("click", () => { taskPage++; renderTasks(); $("task-heading").scrollIntoView({ block: "start" }); });
   $("settings-form").addEventListener("input", () => { settingsDirty = true; });
   $("bark-form").addEventListener("input", () => { barkDirty = true; });
+  $("auth-login-mode").addEventListener("click", () => setAuthMode("login"));
+  $("auth-register-mode").addEventListener("click", () => setAuthMode("register"));
   $("login-form").addEventListener("submit", async (event) => {
-    event.preventDefault(); const button = event.submitter || $("login-form").querySelector("button"); button.disabled = true; $("login-error").textContent = ""; $("login-password").removeAttribute("aria-invalid");
+    event.preventDefault(); const button = event.submitter || $("auth-submit"); button.disabled = true; $("login-error").textContent = ""; $("login-password").removeAttribute("aria-invalid"); $("login-username").removeAttribute("aria-invalid");
     try {
-      await api("/api/login", "POST", { password: $("login-password").value }); authGeneration++; $("login-password").value = ""; await refreshState();
-      // The app is revealed as soon as tasks arrive, before slow auxiliary
-      // reads settle. Only move focus if the user has not already started
-      // using the newly visible page.
+      const username = $("login-username").value.trim();
+      const password = $("login-password").value;
+      if (authMode === "register" && password !== $("login-password-confirm").value) throw new Error("两次输入的密码不一致。");
+      const path = authMode === "register" ? "/api/register" : "/api/login";
+      const result = await api(path, "POST", { username, password });
+      currentUser = result.user || null;
+      authGeneration++; $("login-password").value = ""; $("login-password-confirm").value = ""; await refreshState();
       const active = document.activeElement;
       if (!active || active === document.body || (typeof active.closest === "function" && active.closest("#login-screen"))) $("main").focus({ preventScroll: true });
     }
     catch (error) { if (error.name !== "StaleSessionError") { $("login-error").textContent = error.message; $("login-password").setAttribute("aria-invalid", "true"); } }
     finally { button.disabled = false; }
   });
-  $("login-password").addEventListener("input", () => { $("login-password").removeAttribute("aria-invalid"); $("login-error").textContent = ""; });
-  $("logout").addEventListener("click", (event) => busy(event.currentTarget, async () => { authGeneration++; clearActiveLogin(); await api("/api/logout", "POST"); showLogin(); $("login-password").focus(); }));
+  ["login-username", "login-password", "login-password-confirm"].forEach((id) => $(id).addEventListener("input", () => { $(id).removeAttribute("aria-invalid"); $("login-error").textContent = ""; }));
+  $("logout").addEventListener("click", (event) => busy(event.currentTarget, async () => { const accountID = currentUser?.id; authGeneration++; clearActiveLogin(); showLogin(); try { await api("/api/logout", "POST", undefined, accountID); } catch (_) { $("login-error").textContent = "未能确认退出，旧会话可能仍然有效；请检查网络或服务存储，联系实例管理员。"; } }));
   $("refresh").addEventListener("click", (event) => busy(event.currentTarget, () => refreshState(true)));
   $("sync").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/sync", "POST"); if (await refreshState()) notify(result.message || "已开始同步。"); }));
   $("bark-form").addEventListener("submit", (event) => {

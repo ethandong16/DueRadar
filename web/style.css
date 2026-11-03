@@ -375,6 +375,25 @@ input[type="checkbox"]:focus-visible {
   justify-content: space-between;
   padding: 0 18px;
 }
+.auth-switch {
+  display: flex;
+  gap: 3px;
+  margin-top: 22px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--paper-deep);
+}
+.auth-switch__button {
+  flex: 1;
+  min-height: 36px;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+.auth-switch__button.active { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(25, 27, 22, .08); }
 .login-form__note {
   margin-top: 22px;
   font-size: 12px;
@@ -382,6 +401,15 @@ input[type="checkbox"]:focus-visible {
   color: var(--faint);
   text-align: center;
 }
+.user-identity { display: flex; flex: 1 1 auto; align-items: center; gap: 7px; min-width: 0; }
+.user-identity__avatar { display: grid; place-items: center; width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; background: var(--moss-soft); color: var(--moss); font-family: var(--font-mono); font-size: 12px; }
+.user-identity__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(244, 240, 228, .72); font-size: 12px; }
+.setup-card { margin-bottom: 20px; padding: 18px 20px; border: 1px solid var(--line-strong); border-left: 3px solid var(--signal); border-radius: var(--radius); background: var(--surface); }
+.setup-card h2 { margin-top: 8px; font-size: 16px; }
+.setup-card > p:not(.eyebrow) { margin-top: 6px; color: var(--muted); font-size: 12px; }
+.setup-card ol { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; padding: 0; list-style: none; }
+.setup-card__step .text-button { width: auto; padding: 8px 11px; border: 1px solid var(--line); background: var(--paper-deep); }
+.setup-card__step .text-button:hover { background: var(--surface-2); }
 
 /* ---------- App shell ---------- */
 
@@ -401,9 +429,9 @@ input[type="checkbox"]:focus-visible {
 
 .rail__top {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
 }
 .brand { display: flex; align-items: center; gap: 11px; }
 .brand__text { display: flex; flex-direction: column; }
@@ -428,7 +456,7 @@ input[type="checkbox"]:focus-visible {
 .logout .icon { width: 14px; height: 14px; }
 .logout:hover { color: var(--cream); }
 
-.rail__actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.rail__actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .theme-toggle {
   display: inline-flex;
   align-items: center;
@@ -1523,12 +1551,18 @@ td small { display: block; margin-top: 3px; font-size: 12px; font-weight: 400; c
     padding: 0 16px;
     z-index: 40;
   }
-  .rail__top { width: 100%; }
+  .rail__top { width: 100%; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; }
+  .rail__actions { flex: 0 1 auto; }
   .brand .radar-mark { width: 24px; height: 24px; }
   .brand__text strong { font-size: 18px; }
   .brand__text small { display: none; }
   .logout span { display: none; }
   .logout .icon { width: 18px; height: 18px; }
+  .user-identity { max-width: 92px; }
+  .user-identity__name { font-size: 11px; }
+  .setup-card { padding: 15px; }
+  .setup-card ol { flex-direction: column; }
+  .setup-card__step .text-button { width: 100%; }
 
   .rail__nav {
     position: fixed;

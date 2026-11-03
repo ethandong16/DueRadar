@@ -63,7 +63,7 @@ function browser(intercept = null) {
     takeTimer(delay) { const found = [...timers].find(([, timer]) => timer.delay === delay); assert.ok(found, `timer ${delay} exists`); timers.delete(found[0]); return found[1].fn; },
   };
   const fetch = async (url, options) => {
-    const call = { url, method: options.method, body: options.body && JSON.parse(options.body) };
+    const call = { url, method: options.method, headers: options.headers, body: options.body && JSON.parse(options.body) };
     calls.push(call);
     const delayed = page.intercept?.(call);
     if (delayed) return delayed;
@@ -252,6 +252,40 @@ test("a queued old close event cannot cancel a replacement QR creation", async (
 
 const fixtureTasks = [{ id: "performance-fixture", platform: "rain", title: "优先显示的测试任务", kind: "homework", status: "pending" }];
 function visibleText(element) { return [element.textContent, ...element.children.map(visibleText)].join(" "); }
+
+test("a changed account in another tab clears the old snapshot before reading again", async () => {
+  let identity = "alpha";
+  const page = browser(({ url }) => url === "/api/session" ? response({ user: { id: identity, username: identity } }) : null);
+  await settle();
+  assert.equal(page.$("app").hidden, false);
+  for (const call of page.calls.filter(call => call.url !== "/api/session")) assert.equal(call.headers["X-DueRadar-Account"], "alpha");
+  const reads = page.calls.length;
+  identity = "bravo";
+  page.tick();
+  await settle();
+  assert.equal(page.$("app").hidden, true);
+  assert.equal(page.$("login-screen").hidden, false);
+  assert.match(page.$("login-error").textContent, /其他页面切换/);
+  assert.deepEqual(page.calls.slice(reads).map(call => call.url), ["/api/session"]);
+});
+
+test("an account mismatch during a refresh hides the prior user's data", async () => {
+  const page = browser(({ url }) => url === "/api/session" ? response({ user: { id: "alpha", username: "alpha" } }) : null);
+  await settle();
+  page.intercept = ({ url }) => url === "/api/session" ? response({ user: { id: "alpha", username: "alpha" } }) : url === "/api/tasks" ? response({ error: "登录账号已切换，请重新加载" }, 409) : null;
+  page.tick();
+  await settle();
+  assert.equal(page.$("app").hidden, true);
+  assert.match(page.$("login-error").textContent, /其他页面切换/);
+});
+
+test("logout pins the account even after the view is cleared", async () => {
+  const page = browser(({ url }) => url === "/api/session" ? response({ user: { id: "alpha", username: "alpha" } }) : null);
+  await settle();
+  await page.click("logout");
+  const call = page.calls.find(call => call.url === "/api/logout");
+  assert.equal(call.headers["X-DueRadar-Account"], "alpha");
+});
 
 test("an in-page anchor does not replace the current view", async () => {
   const page = browser();

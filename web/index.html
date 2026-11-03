@@ -55,14 +55,24 @@
         <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
       </button>
       <form id="login-form" class="login-form">
-        <p class="eyebrow">管理入口</p>
-        <h2>登录</h2>
-        <p class="login-form__hint">输入部署时设置的管理密码，进入这台设备上的任务雷达。</p>
-        <label for="login-password">管理密码</label>
-        <input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="输入管理密码" aria-describedby="login-error">
-        <p id="login-error" class="form-error" role="alert"></p>
-        <button class="button primary full" type="submit">进入任务总览 <span aria-hidden="true">→</span></button>
-        <p class="login-form__note">会话只保存在本机 · 数据不离开你的设备</p>
+        <p class="eyebrow">DueRadar 账号</p>
+        <h2 id="auth-title">登录</h2>
+        <p id="auth-hint" class="login-form__hint">登录你的 DueRadar 账号，进入这台设备上的任务雷达。</p>
+        <div class="auth-switch" role="tablist" aria-label="账号操作">
+          <button id="auth-login-mode" class="auth-switch__button active" type="button" role="tab" aria-selected="true">登录</button>
+          <button id="auth-register-mode" class="auth-switch__button" type="button" role="tab" aria-selected="false">创建账号</button>
+        </div>
+        <label for="login-username">账号</label>
+        <input id="login-username" name="username" type="text" autocomplete="username" required minlength="3" maxlength="32" placeholder="输入账号" aria-describedby="login-error">
+        <label for="login-password">密码</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required minlength="12" maxlength="1024" placeholder="输入密码" aria-describedby="login-error">
+        <div id="password-confirm-wrap" hidden>
+          <label for="login-password-confirm">确认密码</label>
+          <input id="login-password-confirm" name="password_confirmation" type="password" autocomplete="new-password" minlength="12" maxlength="1024" placeholder="再次输入密码" aria-describedby="login-error">
+        </div>
+        <p id="login-error" class="form-error" role="alert" aria-live="assertive" aria-atomic="true"></p>
+        <button id="auth-submit" class="button primary full" type="submit">进入任务总览 <span aria-hidden="true">→</span></button>
+        <p class="login-form__note">密码不保存在浏览器 · 数据保存在当前 DueRadar 实例</p>
       </form>
     </div>
   </section>
@@ -78,6 +88,10 @@
           <span class="brand__text"><strong class="wordmark">DueRadar</strong><small>截止雷达</small></span>
         </a>
         <div class="rail__actions">
+          <div id="user-identity" class="user-identity" hidden aria-label="当前 DueRadar 账号">
+            <span id="user-avatar" class="user-identity__avatar" aria-hidden="true"></span>
+            <span id="user-name" class="user-identity__name"></span>
+          </div>
           <button class="theme-toggle" type="button" data-theme-toggle aria-label="切换主题" title="切换主题" aria-pressed="false">
             <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.4A8.6 8.6 0 1 1 9.6 4a6.9 6.9 0 0 0 10.4 10.4Z"/></svg>
             <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
@@ -135,6 +149,12 @@
           <strong>演示数据</strong>
           <span>当前实例以演示模式启动，示例任务不代表真实平台采集结果。</span>
         </div>
+        <section id="first-setup" class="setup-card" hidden aria-labelledby="first-setup-title">
+          <p class="eyebrow">开始使用</p>
+          <h2 id="first-setup-title">完成首次配置</h2>
+          <p id="first-setup-summary"></p>
+          <ol id="first-setup-steps"></ol>
+        </section>
 
         <section id="view-tasks" class="view">
           <header class="page-head">

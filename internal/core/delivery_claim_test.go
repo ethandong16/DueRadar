@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -74,8 +75,8 @@ func TestReturnUnsentDoesNotRefundOtherAttempts(t *testing.T) {
 				}
 			}
 			before := e.Snapshot().Events[0]
-			if err := e.ReturnUnsent(claim); err != nil {
-				t.Fatal(err)
+			if err := e.ReturnUnsent(claim); !errors.Is(err, ErrStaleClaim) {
+				t.Fatalf("expected stale claim, got %v", err)
 			}
 			after := e.Snapshot().Events[0]
 			if before.Status != after.Status || before.Attempts != after.Attempts || !sameTime(before.NextAttemptAt, after.NextAttemptAt) {
