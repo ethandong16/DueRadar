@@ -68,6 +68,12 @@ type Server struct {
 	rainAssistActive  *rainAssist
 	inClassMu         sync.Mutex
 	inClassStatus     inClassStatus
+	classroomEpoch    uint64 // Protected by rainMu, including the fields below.
+	classrooms        map[string]*classroomWatch
+	classroomStatus   classroomStatus
+	openClassroom     func(context.Context, rainAdapter, platform.LiveLesson) (classroomChannel, error)
+	analysisGate      chan struct{}
+	analyzeProblem    func(context.Context, vault.Config, platform.ClassroomProblem) (string, error)
 	lifetime          context.Context
 	lifetimeCancel    context.CancelFunc
 	lifeMu            sync.Mutex
@@ -90,6 +96,7 @@ func New(engine *core.Engine, credentials *vault.Vault, password string, demo, s
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{Engine: engine, Vault: credentials, Demo: demo, SecureCookies: secure, password: sha256.Sum256([]byte(password)), started: time.Now(), sessions: map[string]session{}, attempts: map[string]attempt{}, syncGate: make(chan struct{}, 1), lifetime: ctx, lifetimeCancel: cancel,
+		classrooms: make(map[string]*classroomWatch), openClassroom: defaultOpenClassroom, analysisGate: make(chan struct{}, 1), analyzeProblem: defaultAnalyzeProblem,
 		startZhidao: defaultZhidaoFlow, newZhidao: func(session string) rainAdapter { return platform.NewZhidao(session) }, startRain: defaultRainFlow, newRain: func(cookie string) rainAdapter { return platform.NewRain(cookie) }, sendBark: bark.Send}, nil
 }
 
@@ -116,6 +123,8 @@ func (s *Server) handler(static http.Handler) http.Handler {
 	mux.HandleFunc("PUT /api/settings", s.protected(s.settings))
 	mux.HandleFunc("GET /api/bark", s.protected(s.getBark))
 	mux.HandleFunc("PUT /api/bark", s.protected(s.setBark))
+	mux.HandleFunc("GET /api/analysis", s.protected(s.getAnalysis))
+	mux.HandleFunc("PUT /api/analysis", s.protected(s.setAnalysis))
 	mux.HandleFunc("POST /api/bark/test", s.protected(s.testBark))
 	mux.HandleFunc("POST /api/in-class/test", s.protected(s.testInClass))
 	mux.HandleFunc("POST /api/accounts/rain/login", s.protected(s.startRainLogin))
@@ -364,7 +373,11 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	}
 	// Serialize the in-class enabled flag with a live poll's final commit.
 	s.rainMu.Lock()
+	previous := s.Engine.Snapshot().Settings
 	err := s.Engine.UpdateSettings(settings)
+	if err == nil && (previous.RainFallbackEnabled != settings.RainFallbackEnabled || previous.RainAnalysisEnabled != settings.RainAnalysisEnabled) {
+		s.invalidateClassroomsLocked()
+	}
 	s.rainMu.Unlock()
 	if err != nil {
 		fail(w, 400, err.Error())
@@ -457,6 +470,15 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	inClass := s.inClassSnapshot()
 	settings := s.Engine.Snapshot().Settings
+	s.rainMu.Lock()
+	classroom := s.classroomStatus
+	classroom.Connected = 0
+	for _, watch := range s.classrooms {
+		if watch.channel != nil && s.classroomCurrentLocked(watch) {
+			classroom.Connected++
+		}
+	}
+	s.rainMu.Unlock()
 	var lastCheck any
 	if !inClass.LastCheckAt.IsZero() {
 		lastCheck = inClass.LastCheckAt
@@ -466,6 +488,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		lastQuiz = inClass.LastQuizAt
 	}
 	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 2, "go_version": runtime.Version(), "message": "普通雨课堂和知到校内课支持扫码绑定；共享课待实测", "notification_error": deliveryError, "notification_last_attempt_at": deliveryAt, "notification_failure_count": health.UnresolvedFailures, "notification_last_success_at": health.LastSuccessAt,
+		"classroom": classroom, "rain_fallback_enabled": settings.RainFallbackEnabled, "rain_analysis_enabled": settings.RainAnalysisEnabled,
 		"in_class_enabled": settings.InClassEnabled, "in_class_poll_seconds": settings.InClassPollSeconds, "in_class_last_check_at": lastCheck, "in_class_lessons": inClass.Lessons, "in_class_last_quiz_at": lastQuiz, "in_class_last_quiz": inClass.LastQuiz, "in_class_detected": inClass.Detected, "in_class_error": inClass.Error})
 }
 
@@ -686,6 +709,7 @@ func (s *Server) Run(ctx context.Context) {
 		}
 	})
 	s.startJob(s.runInClass)
+	s.startJob(s.runClassrooms)
 	<-s.lifetime.Done()
 	// The lifetime cancellation stops the ticker loops, but a platform request
 	// or final durable delivery may still be unwinding. Keep the worker alive

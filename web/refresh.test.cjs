@@ -45,7 +45,8 @@ function browser(intercept = null) {
     return elements.get(id);
   }
   for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all";
-  $("settings-form").inputs = ["deadline-minutes", "exam-minutes", "video-minutes", "quiet-enabled", "quiet-start", "quiet-end", "timezone", "in-class-enabled", "in-class-poll"].map($);
+  $("settings-form").inputs = ["deadline-minutes", "exam-minutes", "video-minutes", "quiet-enabled", "quiet-start", "quiet-end", "timezone", "in-class-enabled", "in-class-poll", "rain-fallback-enabled", "rain-analysis-enabled"].map($);
+  $("analysis-form").inputs = ["analysis-key", "analysis-model"].map($);
   let interval;
   let loggedIn = true;
   const calls = [];
@@ -78,6 +79,7 @@ function browser(intercept = null) {
     if (url === "/api/tasks" || url === "/api/events") return response([]);
     if (url === "/api/accounts") return response([{ platform: "rain", ready: true, login_state: "logged_in", sync_state: "success" }]);
     if (url === "/api/bark") return response({ configured: true, server: "https://api.day.app" });
+    if (url === "/api/analysis") return response({ configured: true, model: "claude-opus-5-5" });
     if (url === "/api/status") return response({ version: "fixture", demo: false });
     return response({});
   };
@@ -315,7 +317,7 @@ test("a filter that matches nothing is not reported as an empty semester", async
   assert.doesNotMatch(text, /本学期暂无任务/);
 });
 
-for (const slowPath of ["/api/events", "/api/accounts", "/api/settings", "/api/bark", "/api/status"]) {
+for (const slowPath of ["/api/events", "/api/accounts", "/api/settings", "/api/bark", "/api/analysis", "/api/status"]) {
   test(`tasks appear while ${slowPath} is still pending`, async () => {
     const slow = deferred();
     const page = browser(({ url }) => url === slowPath ? slow.promise : url === "/api/tasks" ? response(fixtureTasks) : null);
@@ -326,6 +328,7 @@ for (const slowPath of ["/api/events", "/api/accounts", "/api/settings", "/api/b
     assert.equal(page.$("connection-error").hidden, true, "loading progress is not an alert");
     if (slowPath === "/api/settings" || slowPath === "/api/status") assert.equal(page.$("settings-form").querySelector("button").disabled, true);
     if (slowPath === "/api/bark" || slowPath === "/api/status") assert.equal(page.$("bark-form").querySelector("button").disabled, true);
+    if (slowPath === "/api/analysis" || slowPath === "/api/status") assert.equal(page.$("analysis-form").querySelector("button").disabled, true);
     slow.reject(new Error("auxiliary fixture failure"));
     await settle();
     assert.equal(page.$("app").hidden, false);
@@ -418,4 +421,82 @@ test("settings inputs stay disabled until their saved values arrive", async () =
   assert.equal(page.$("deadline-minutes").disabled, false);
   assert.equal(page.$("deadline-minutes").value, "1440, 180, 30");
   assert.equal(page.$("timezone").value, "Asia/Shanghai");
+});
+
+test("classroom assistants default off and save independent opt-ins", async () => {
+  const page = browser();
+  await settle();
+  assert.equal(page.$("rain-fallback-enabled").checked, false);
+  assert.equal(page.$("rain-analysis-enabled").checked, false);
+  page.$("rain-fallback-enabled").checked = true;
+  page.$("settings-form").emit("input");
+  await page.submit("settings-form");
+  await settle();
+  const saved = page.calls.find(call => call.url === "/api/settings" && call.method === "PUT");
+  assert.equal(saved.body.rain_fallback_enabled, true);
+  assert.equal(saved.body.rain_analysis_enabled, false);
+  await page.click("settings-defaults");
+  assert.equal(page.$("rain-fallback-enabled").checked, false);
+  assert.equal(page.$("rain-analysis-enabled").checked, false);
+});
+
+test("background refresh preserves an unsaved model and key", async () => {
+  const page = browser();
+  await settle();
+  page.$("analysis-model").value = "claude-sonnet-5-5";
+  page.$("analysis-key").value = "fixture-unsaved-model-key";
+  page.$("analysis-form").emit("input");
+  await page.click("refresh");
+  assert.equal(page.$("analysis-model").value, "claude-sonnet-5-5");
+  assert.equal(page.$("analysis-key").value, "fixture-unsaved-model-key");
+  assert.equal(page.calls.some(call => call.url === "/api/analysis" && call.method === "PUT"), false);
+});
+
+test("saving model configuration clears the draft key only after success", async () => {
+  const page = browser();
+  await settle();
+  const save = deferred();
+  page.intercept = ({url, method}) => url === "/api/analysis" && method === "PUT" && save.promise;
+  page.$("analysis-model").value = "claude-sonnet-5-5";
+  page.$("analysis-key").value = "fixture-unsaved-model-key";
+  page.$("analysis-form").emit("input");
+  page.submit("analysis-form");
+  await settle();
+  assert.equal(page.$("analysis-key").value, "fixture-unsaved-model-key");
+  const sent = page.calls.find(call => call.url === "/api/analysis" && call.method === "PUT");
+  assert.deepEqual(sent.body, {key:"fixture-unsaved-model-key", model:"claude-sonnet-5-5"});
+  save.resolve(response({configured:true, model:"claude-sonnet-5-5"}));
+  await settle();
+  assert.equal(page.$("analysis-key").value, "");
+  assert.match(page.$("toast").textContent, /未调用模型/);
+  assert.equal(page.calls.some(call => call.url === "/api/bark/test"), false);
+});
+
+test("clearing model key sends an explicit removal request", async () => {
+  const page = browser();
+  await settle();
+  await page.click("analysis-clear");
+  const sent = page.calls.find(call => call.url === "/api/analysis" && call.method === "PUT");
+  assert.deepEqual(sent.body, {model:"claude-opus-5-5", clear_key:true});
+  assert.match(page.$("toast").textContent, /不再调用模型/);
+});
+
+test("logout clears model drafts and fences a late model configuration save", async () => {
+  const page = browser();
+  await settle();
+  const save = deferred();
+  page.intercept = ({url, method}) => url === "/api/analysis" && method === "PUT" && save.promise;
+  page.$("analysis-key").value = "fixture-unsaved-model-key";
+  page.$("analysis-form").emit("input");
+  page.submit("analysis-form");
+  await settle();
+  await page.click("logout");
+  assert.equal(page.$("analysis-key").value, "");
+  assert.equal(page.$("analysis-model").value, "");
+  const requests = page.calls.length;
+  save.resolve(response({configured:true}));
+  await settle();
+  assert.equal(page.calls.length, requests);
+  assert.equal(page.$("app").hidden, true);
+  assert.equal(page.$("toast").hidden, true);
 });

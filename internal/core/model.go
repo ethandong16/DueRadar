@@ -39,6 +39,9 @@ type Settings struct {
 	// answerable activity is pushed. PollSeconds is the fast-loop interval.
 	InClassEnabled     bool `json:"in_class_enabled"`
 	InClassPollSeconds int  `json:"in_class_poll_seconds"`
+	// Both classroom assistants are opt-in and independent of reminder delivery.
+	RainFallbackEnabled bool `json:"rain_fallback_enabled"`
+	RainAnalysisEnabled bool `json:"rain_analysis_enabled"`
 }
 
 // DefaultInClassPollSeconds keeps a live class responsive without hammering the
@@ -97,4 +100,7 @@ type State struct {
 	// repeated poll cannot notify the same quiz twice. Values are detection times
 	// and are pruned after a week.
 	InClassSeen map[string]time.Time `json:"in_class_seen,omitempty"`
+	// ClassroomActions reserves each external action durably before transport.
+	// An ambiguous timeout or restart must not result in a second submission.
+	ClassroomActions map[string]time.Time `json:"classroom_actions,omitempty"`
 }

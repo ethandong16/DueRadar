@@ -19,8 +19,9 @@ import (
 
 var ErrSessionExpired = errors.New("平台会话已失效，请重新登录")
 
-// Rain reads the ordinary YukeTang student activity feed. It never opens an
-// assignment or exam, or calls an answer, submission, or learning-progress API.
+// Rain reads the ordinary YukeTang student activity feed. Task sync never opens
+// assignments/exams or writes learning progress. The separate, opt-in live
+// classroom channel can submit one random choice for a verified student problem.
 type Rain struct {
 	cookie  string
 	baseURL string
@@ -47,6 +48,7 @@ type rainEnvelope struct {
 	Code    *int            `json:"code"`
 	ErrCode *int            `json:"errcode"`
 	Success *bool           `json:"success"`
+	Status  *int            `json:"status"`
 	Data    json.RawMessage `json:"data"`
 }
 

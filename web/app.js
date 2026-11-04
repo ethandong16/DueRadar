@@ -2,11 +2,11 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const defaults = { deadline_minutes: [1440, 180, 30], exam_start_minutes: [1440, 60], video_minutes: [4320, 1440, 180], quiet_enabled: true, quiet_start: "23:00", quiet_end: "08:00", timezone: "Asia/Shanghai", in_class_enabled: true, in_class_poll_seconds: 20 };
+  const defaults = { deadline_minutes: [1440, 180, 30], exam_start_minutes: [1440, 60], video_minutes: [4320, 1440, 180], quiet_enabled: true, quiet_start: "23:00", quiet_end: "08:00", timezone: "Asia/Shanghai", in_class_enabled: true, in_class_poll_seconds: 20, rain_fallback_enabled: false, rain_analysis_enabled: false };
   const viewNames = { tasks: "任务总览", accounts: "平台账号", settings: "通知设置", activity: "运行记录" };
   const kindNames = { homework: "作业", exam: "考试", chapter: "章节测试", video: "视频学习" };
   const taskStatus = { pending: ["待完成", "warning"], completed: ["已完成", "success"], unknown: ["状态未知", "neutral"] };
-  const eventNames = { new_task: "新任务", new: "新任务", deadline: "截止提醒", exam_start: "考试开始", video_deadline: "视频截止", time_changed: "时间变更", changed: "时间变更", login_expired: "登录过期", sync_failure: "同步故障", sync_failed: "同步故障", platform_failure: "平台故障", overdue: "截止提醒", in_class: "课上答题" };
+  const eventNames = { new_task: "新任务", new: "新任务", deadline: "截止提醒", exam_start: "考试开始", video_deadline: "视频截止", time_changed: "时间变更", changed: "时间变更", login_expired: "登录过期", sync_failure: "同步故障", sync_failed: "同步故障", platform_failure: "平台故障", overdue: "截止提醒", in_class: "课上答题", rain_analysis: "AI 参考答案" };
   const eventStatuses = { pending: ["等待发送", "neutral"], deferred: ["静默延后", "neutral"], sent: ["已发送", "success"], failed: ["发送失败", "danger"], retry: ["等待重试", "warning"], skipped: ["已跳过", "neutral"], cancelled: ["已取消", "neutral"], canceled: ["已取消", "neutral"], expired: ["已失效", "neutral"] };
   const loginStatuses = { demo: ["演示模式", "neutral"], unbound: ["未绑定", "neutral"], not_bound: ["未绑定", "neutral"], pending: ["等待验证", "warning"], waiting: ["等待验证", "warning"], logged_in: ["已登录", "success"], authenticated: ["已登录", "success"], active: ["已登录", "success"], expired: ["已过期", "danger"], failed: ["验证失败", "danger"], unsupported: ["待接入", "neutral"], unimplemented: ["待接入", "neutral"], not_configured: ["未配置", "neutral"] };
   const syncStatuses = { demo: ["示例数据", "neutral"], idle: ["等待同步", "neutral"], pending: ["等待同步", "neutral"], success: ["同步成功", "success"], ok: ["同步成功", "success"], syncing: ["同步中", "warning"], failed: ["同步失败", "danger"], error: ["同步失败", "danger"], blocked: ["等待登录", "warning"], unavailable: ["待接入", "neutral"], unsupported: ["待接入", "neutral"], unimplemented: ["待接入", "neutral"], not_configured: ["未配置", "neutral"] };
@@ -25,6 +25,7 @@
   let refreshJob = null;
   let settingsDirty = false;
   let barkDirty = false;
+  let analysisDirty = false;
 
   function node(tag, className, content) {
     const result = document.createElement(tag);
@@ -102,6 +103,9 @@
     state = null;
     settingsDirty = false;
     barkDirty = false;
+    analysisDirty = false;
+    $("analysis-key").value = "";
+    $("analysis-model").value = "";
     $("bark-key").value = "";
     $("login-username").value = "";
     $("login-password").value = "";
@@ -455,6 +459,8 @@
     $("timezone").value = settings.timezone || "Asia/Shanghai";
     $("in-class-enabled").checked = settings.in_class_enabled !== false;
     $("in-class-poll").value = settings.in_class_poll_seconds || defaults.in_class_poll_seconds;
+    $("rain-fallback-enabled").checked = Boolean(settings.rain_fallback_enabled);
+    $("rain-analysis-enabled").checked = Boolean(settings.rain_analysis_enabled);
   }
   // Background refreshes rebuild these lists. Without restoring focus, a
   // keyboard user who is tabbing through a task or platform loses their place
@@ -530,6 +536,17 @@
     $("bark-server").disabled = barkUnavailable;
     if (state.bark && !barkDirty) $("bark-server").value = state.bark.server || "https://api.day.app";
     $("bark-key").placeholder = barkConfigured ? "已保存，留空保留当前密钥" : "输入 Bark 设备密钥";
+    const analysisConfigured = Boolean(state.analysis?.configured);
+    $("analysis-status").textContent = !state.analysis ? "尚未加载" : analysisConfigured ? "已配置" : "未配置";
+    $("analysis-status").className = `badge ${analysisConfigured ? "success" : "neutral"}`;
+    const analysisUnavailable = !state.analysis || !state.runtime || state.demo;
+    const analysisButton = $("analysis-form").querySelector("button[type=submit]");
+    analysisButton.disabled = analysisUnavailable || analysisButton.dataset.busy === "true";
+    $("analysis-key").disabled = analysisUnavailable;
+    $("analysis-model").disabled = analysisUnavailable;
+    $("analysis-clear").disabled = analysisUnavailable || !analysisConfigured || $("analysis-clear").dataset.busy === "true";
+    if (state.analysis && !analysisDirty) $("analysis-model").value = state.analysis.model || "claude-opus-5-5";
+    $("analysis-key").placeholder = analysisConfigured ? "已保存，留空保留当前密钥" : "输入 Anthropic API Key";
     $("runtime-grid").replaceChildren();
     const runtime = state.runtime || {};
     const uptime = Number.isFinite(runtime.uptime_seconds) ? `${Math.floor(runtime.uptime_seconds / 3600)} 小时 ${Math.floor(runtime.uptime_seconds % 3600 / 60)} 分钟` : "未知";
@@ -538,7 +555,7 @@
     const inClassLessons = Array.isArray(runtime.in_class_lessons) ? runtime.in_class_lessons : [];
     const inClassState = !inClassOn ? "已关闭" : runtime.in_class_error ? runtime.in_class_error : inClassLessons.length ? `正在上课 · ${inClassLessons.join("、")}` : runtime.in_class_last_check_at ? `守候中 · ${formatDate(runtime.in_class_last_check_at, true)}` : "等待首次检查";
     const inClassRecent = runtime.in_class_last_quiz_at ? `${runtime.in_class_last_quiz || "课上答题"} · ${formatDate(runtime.in_class_last_quiz_at, true)}` : "暂无检测记录";
-    const readouts = [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["课上答题监测", state.runtime ? inClassState : "尚未加载"], ["最近课上答题", state.runtime ? inClassRecent : "尚未加载"], ["通知运行状态", state.runtime ? runtime.notification_error || "正常" : "尚未加载"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"]];
+    const readouts = [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["课上答题监测", state.runtime ? inClassState : "尚未加载"], ["最近课上答题", state.runtime ? inClassRecent : "尚未加载"], ["雨课堂随堂助手", !runtime.rain_fallback_enabled && !runtime.rain_analysis_enabled ? "已关闭" : runtime.classroom?.error || `实时连接 ${runtime.classroom?.connected || 0} 个 · 兜底${runtime.rain_fallback_enabled ? "开" : "关"} / AI ${runtime.rain_analysis_enabled ? "开" : "关"}`], ["最近兜底动作", runtime.classroom?.last_action || "暂无记录"], ["通知运行状态", state.runtime ? runtime.notification_error || "正常" : "尚未加载"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"]];
     readouts.forEach(([label, value], index) => {
       const card = node("article", "runtime-card");
       if (index === readouts.length - 1) card.classList.add("runtime-card--wide");
@@ -597,7 +614,7 @@
         do {
           job.queued = false;
           try {
-            if (!authenticated && !currentUser) { settingsDirty = false; barkDirty = false; }
+            if (!authenticated && !currentUser) { settingsDirty = false; barkDirty = false; analysisDirty = false; }
             // Authenticate before parallel reads. A queued refresh starts after
             // this pass, so a save never joins a snapshot taken before its write.
             const session = await api("/api/session");
@@ -607,10 +624,10 @@
               return false;
             }
             currentUser = session.user || currentUser;
-            const snapshot = { tasks: [], events: [], platforms: [], settings: null, bark: null, runtime: null, demo: false, user: session.user || currentUser, setup: session.setup || null, ...state };
+            const snapshot = { tasks: [], events: [], platforms: [], settings: null, bark: null, analysis: null, runtime: null, demo: false, user: session.user || currentUser, setup: session.setup || null, ...state };
             snapshot.user = session.user || currentUser;
             snapshot.setup = session.setup || null;
-            const sections = { tasks: "任务", events: "通知记录", accounts: "平台账号", settings: "提醒设置", bark: "Bark 配置", status: "运行状态" };
+            const sections = { tasks: "任务", events: "通知记录", accounts: "平台账号", settings: "提醒设置", bark: "Bark 配置", analysis: "AI 配置", status: "运行状态" };
             const pending = new Set(Object.keys(sections));
             const errors = new Map();
             let tasksReady = false;
@@ -690,6 +707,7 @@
   $("task-next").addEventListener("click", () => { taskPage++; renderTasks(); $("task-heading").scrollIntoView({ block: "start" }); });
   $("settings-form").addEventListener("input", () => { settingsDirty = true; });
   $("bark-form").addEventListener("input", () => { barkDirty = true; });
+  $("analysis-form").addEventListener("input", () => { analysisDirty = true; });
   $("auth-login-mode").addEventListener("click", () => setAuthMode("login"));
   $("auth-register-mode").addEventListener("click", () => setAuthMode("register"));
   $("login-form").addEventListener("submit", async (event) => {
@@ -721,6 +739,22 @@
       await api("/api/bark", "PUT", { server, key }); barkDirty = false; $("bark-key").value = ""; if (await refreshState()) notify("Bark 配置已保存。");
     });
   });
+  $("analysis-form").addEventListener("submit", (event) => {
+    event.preventDefault(); busy(event.submitter || $("analysis-form").querySelector("button"), async () => {
+      if (!state?.analysis || !state?.runtime || state.demo) throw new Error("请等待 AI 配置及运行状态加载完成后再保存。");
+      const key = $("analysis-key").value.trim(); const model = $("analysis-model").value.trim();
+      if (!/^claude-[a-z0-9.-]+$/.test(model) || model.length > 100) throw new Error("请填写有效的 Claude 模型名称。");
+      if (!key && !state.analysis.configured) throw new Error("首次配置需要填写 Anthropic API Key。");
+      await api("/api/analysis", "PUT", { key, model }); analysisDirty = false; $("analysis-key").value = "";
+      if (await refreshState()) notify("AI 配置已保存，未调用模型。");
+    });
+  });
+  $("analysis-clear").addEventListener("click", (event) => busy(event.currentTarget, async () => {
+    if (!state?.analysis || !state?.runtime || state.demo) return;
+    await api("/api/analysis", "PUT", { model: state.analysis.model, clear_key: true });
+    analysisDirty = false; $("analysis-key").value = "";
+    if (await refreshState()) notify("AI 密钥已移除，不再调用模型。");
+  }));
   $("bark-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/bark/test", "POST"); notify(result.message || "测试通知已发送。"); }));
   $("in-class-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/in-class/test", "POST"); notify(result.message || "测试通知已发送。"); }));
   $("settings-defaults").addEventListener("click", () => { populateSettings(defaults); settingsDirty = true; notify("已填入默认值，保存后生效。"); });
@@ -729,7 +763,7 @@
       if (!state?.settings || !state?.runtime) throw new Error("请等待提醒设置及运行状态加载完成后再保存。");
       const pollSeconds = Number.parseInt($("in-class-poll").value, 10);
       if (!Number.isInteger(pollSeconds) || pollSeconds < 10 || pollSeconds > 300) throw new Error("课上答题检查间隔请填写 10—300 秒。");
-      const settings = { deadline_minutes: parseMinutes("deadline-minutes", "截止提醒"), exam_start_minutes: parseMinutes("exam-minutes", "考试开始"), video_minutes: parseMinutes("video-minutes", "视频截止"), quiet_enabled: $("quiet-enabled").checked, quiet_start: $("quiet-start").value, quiet_end: $("quiet-end").value, timezone: $("timezone").value.trim(), in_class_enabled: $("in-class-enabled").checked, in_class_poll_seconds: pollSeconds };
+      const settings = { deadline_minutes: parseMinutes("deadline-minutes", "截止提醒"), exam_start_minutes: parseMinutes("exam-minutes", "考试开始"), video_minutes: parseMinutes("video-minutes", "视频截止"), quiet_enabled: $("quiet-enabled").checked, quiet_start: $("quiet-start").value, quiet_end: $("quiet-end").value, timezone: $("timezone").value.trim(), in_class_enabled: $("in-class-enabled").checked, in_class_poll_seconds: pollSeconds, rain_fallback_enabled: $("rain-fallback-enabled").checked, rain_analysis_enabled: $("rain-analysis-enabled").checked };
       try { new Intl.DateTimeFormat("zh-CN", { timeZone: settings.timezone }); } catch { throw new Error("请填写有效的 IANA 时区，例如 Asia/Shanghai。"); }
       if (settings.quiet_enabled && settings.quiet_start === settings.quiet_end) throw new Error("静默开始和结束时间应不同；全天接收提醒可关闭静默时段。");
       await api("/api/settings", "PUT", settings); settingsDirty = false; if (await refreshState()) notify("提醒规则已保存。");

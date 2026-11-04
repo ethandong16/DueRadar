@@ -31,7 +31,7 @@ type InClassQuiz struct {
 // urgentEvent marks notifications that must bypass quiet hours. A quiz pushed
 // during class is only answerable for a short time, so it is always urgent.
 func urgentEvent(ev Event) bool {
-	if ev.Kind == "in_class" {
+	if ev.Kind == "in_class" || ev.Kind == "rain_analysis" {
 		return true
 	}
 	return ev.Kind == "exam_start" && ev.MinutesBefore == 60 || (ev.Kind == "deadline" || ev.Kind == "video_deadline") && ev.MinutesBefore == 30
