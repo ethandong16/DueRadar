@@ -50,9 +50,11 @@ func (p ClassroomProblem) FallbackReady(now time.Time) bool {
 		!p.TimingAt.IsZero() && !now.Before(p.TimingAt) && !now.Before(p.StartedAt) && now.Sub(p.TimingAt) < 5*time.Second && left > 0 && left <= 10*time.Second
 }
 
-// LiveClassroom deliberately uses the legacy read-only student bootstrap. The
+// LiveClassroom reads the student timeline over the websocket. The handshake is
+// read-only: it carries a student role, the lesson id and no lesson token. The
 // v3 bootstrap calls /lesson/checkin, which changes attendance and is NOT used.
-// Unsupported responses fail closed rather than silently checking the user in.
+// Presentation metadata is optional; a missing legacy bootstrap leaves problems
+// detectable but without slide text or options.
 type LiveClassroom struct {
 	rain     *Rain
 	lesson   LiveLesson
@@ -102,6 +104,41 @@ type rainClassroomData struct {
 	} `json:"presentationList"`
 }
 
+// rainID accepts both JSON strings and numbers. The live timeline sends
+// 19-digit identifiers as strings (a JSON number would lose precision), while
+// older presentation responses use numbers.
+type rainID string
+
+func (id *rainID) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*id = ""
+		return nil
+	}
+	if data[0] == '"' {
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
+			return err
+		}
+		*id = rainID(text)
+		return nil
+	}
+	var number json.Number
+	if err := json.Unmarshal(data, &number); err != nil {
+		return err
+	}
+	*id = rainID(number.String())
+	return nil
+}
+
+func (id rainID) String() string { return string(id) }
+
+func (id rainID) positive() bool { return rainPositiveID(json.Number(id)) }
+
+
+// classroomData reads the legacy presentation bootstrap. It supplies slide
+// text and options for older lessons, but newer live lessons reject it. The
+// caller treats it as optional metadata, never as permission to open the
+// student socket.
 func (r *Rain) classroomData(ctx context.Context, lessonID string) (rainClassroomData, error) {
 	var data rainClassroomData
 	if !rainPositiveID(json.Number(lessonID)) {
@@ -112,12 +149,32 @@ func (r *Rain) classroomData(ctx context.Context, lessonID string) (rainClassroo
 		return data, err
 	}
 	if !rainLegacyOK(env) || json.Unmarshal(env.Data, &data) != nil || data.Presentations == nil || !rainPositiveID(data.UserID) {
-		return data, errors.New("课堂学生只读响应不受支持（不会自动签到）")
+		return data, errors.New("课堂只读课件元数据不可用")
 	}
 	if len(data.Presentations) > 100 {
 		return data, errors.New("课堂课件数量超限")
 	}
 	return data, nil
+}
+
+// classroomUserID reads the signed-in student id from the independent user
+// endpoint. It is only used as the websocket hello field; no write endpoint is
+// contacted.
+func (r *Rain) classroomUserID(ctx context.Context) (json.Number, error) {
+	env, err := r.get(ctx, "/api/v3/user/basic-info")
+	if err != nil {
+		return "", err
+	}
+	if env.Code == nil || *env.Code != 0 {
+		return "", errors.New("课堂用户信息不可用")
+	}
+	var user struct {
+		ID rainID `json:"id"`
+	}
+	if json.Unmarshal(env.Data, &user) != nil || !user.ID.positive() {
+		return "", errors.New("课堂用户信息缺少标识")
+	}
+	return json.Number(user.ID.String()), nil
 }
 
 func rainLegacyOK(env rainEnvelope) bool {
@@ -130,12 +187,24 @@ func (r *Rain) OpenClassroom(ctx context.Context, lesson LiveLesson) (*LiveClass
 	if lesson.Role != 5 || !rainPositiveID(json.Number(lesson.ClassroomID)) {
 		return nil, errors.New("不是已确认的学生课堂")
 	}
-	data, err := r.classroomData(ctx, lesson.LessonID)
-	if err != nil {
-		return nil, err
+	// Presentation metadata enriches problems with slide text and options, but
+	// newer v3 lessons no longer serve the legacy bootstrap. Its absence must
+	// not hide the read-only timeline: the socket below accepts a student
+	// hello without a lesson token and never checks the user in.
+	metadataCtx, stopMetadata := context.WithTimeout(ctx, 4*time.Second)
+	data, metadataErr := r.classroomData(metadataCtx, lesson.LessonID)
+	stopMetadata()
+	if metadataErr != nil {
+		data = rainClassroomData{}
 	}
-	if len(data.Auth) == 0 || string(data.Auth) == "null" || string(data.Auth) == `""` {
-		return nil, errors.New("课堂实时授权缺失")
+	userID := data.UserID
+	if !rainPositiveID(userID) {
+		read, stop := context.WithTimeout(ctx, 4*time.Second)
+		id, err := r.classroomUserID(read)
+		stop()
+		if err == nil {
+			userID = id
+		}
 	}
 	client := *r.client
 	client.Timeout = 0 // Dial context bounds handshake; watch lifetime bounds the socket.
@@ -148,7 +217,19 @@ func (r *Rain) OpenClassroom(ctx context.Context, lesson LiveLesson) (*LiveClass
 	}
 	conn.SetReadLimit(4 << 20)
 	c := &LiveClassroom{rain: r, lesson: lesson, conn: conn, data: data, problems: make(map[string]ClassroomProblem), changed: make(chan struct{}), timing: make(map[string]*rainTimingRequest), revision: make(map[string]uint64)}
-	hello := map[string]any{"op": "hello", "userid": data.UserID, "role": "student", "auth": data.Auth, "lessonid": json.Number(lesson.LessonID), "ver": 1}
+	// The live timeline keys the hello by string. Sending a JSON number loses
+	// precision for 19-digit lesson ids and the server answers lessonfinished.
+	hello := map[string]any{"op": "hello", "role": "student", "lessonid": lesson.LessonID, "ver": 1}
+	if rainPositiveID(userID) {
+		hello["userid"] = userID.String()
+	}
+	if len(data.Auth) > 0 && string(data.Auth) != "null" && string(data.Auth) != `""` {
+		hello["auth"] = data.Auth
+	} else {
+		// Read-only timeline access does not require a lesson token. Never call
+		// /lesson/checkin to obtain one.
+		hello["auth"] = 0
+	}
 	if rainPositiveID(data.ActiveID) {
 		hello["presentation"] = data.ActiveID
 	}
@@ -176,7 +257,7 @@ func (c *LiveClassroom) Run(ctx context.Context, onProblem func(ClassroomProblem
 				return
 			case <-ticker.C:
 				beat, stop := context.WithTimeout(ctx, 3*time.Second)
-				err := wsjson.Write(beat, c.conn, map[string]any{"op": "xintiao", "lessonid": json.Number(c.lesson.LessonID)})
+				err := wsjson.Write(beat, c.conn, map[string]any{"op": "xintiao", "lessonid": c.lesson.LessonID})
 				stop()
 				if err != nil {
 					c.Close()
@@ -199,9 +280,9 @@ func (c *LiveClassroom) Run(ctx context.Context, onProblem func(ClassroomProblem
 			Op        string                `json:"op"`
 			Timeline  []rainTimelineProblem `json:"timeline"`
 			Problem   rainTimelineProblem   `json:"problem"`
-			ProblemID json.Number           `json:"problemid"`
+			ProblemID rainID                `json:"problemid"`
 			MessageID json.Number           `json:"msgid"`
-			Prob      json.Number           `json:"prob"`
+			Prob      rainID                `json:"prob"`
 			Now       int64                 `json:"now"`
 			DT        int64                 `json:"dt"`
 			Limit     *int64                `json:"limit"`
@@ -293,20 +374,20 @@ func (c *LiveClassroom) Run(ctx context.Context, onProblem func(ClassroomProblem
 }
 
 type rainTimelineProblem struct {
-	Type  string      `json:"type"`
-	Prob  json.Number `json:"prob"`
-	Pres  json.Number `json:"pres"`
-	SID   json.Number `json:"sid"`
-	Index int         `json:"si"`
-	DT    int64       `json:"dt"`
-	Now   int64       `json:"now"`
-	Limit *int64      `json:"limit"`
+	Type  string  `json:"type"`
+	Prob  rainID  `json:"prob"`
+	Pres  rainID  `json:"pres"`
+	SID   rainID  `json:"sid"`
+	Index int     `json:"si"`
+	DT    int64   `json:"dt"`
+	Now   int64   `json:"now"`
+	Limit *int64  `json:"limit"`
 }
 
 func (c *LiveClassroom) signalLocked() { close(c.changed); c.changed = make(chan struct{}) }
 
 func (c *LiveClassroom) loadProblem(ctx context.Context, event rainTimelineProblem, callback func(ClassroomProblem)) error {
-	if !rainPositiveID(event.Prob) || !rainPositiveID(event.Pres) {
+	if !event.Prob.positive() || !event.Pres.positive() {
 		return nil
 	}
 	c.mu.Lock()
@@ -316,48 +397,77 @@ func (c *LiveClassroom) loadProblem(ctx context.Context, event rainTimelineProbl
 	if !exists && full {
 		return errors.New("课堂题目数量超限")
 	}
+	choice := false
 	if !exists {
 		p, ok := classroomProblem(c.data, c.lesson.LessonID, event)
-		if !ok {
+		if !ok && len(c.data.Presentations) > 0 {
 			// Newly added presentations need one bounded read; cached slides avoid
 			// doing an HTTP roundtrip for every entry of a reconnect timeline.
 			read, stop := context.WithTimeout(ctx, 3*time.Second)
 			data, err := c.rain.classroomData(read, c.lesson.LessonID)
 			stop()
-			if err != nil {
-				return err
-			}
-			c.data = data
-			p, ok = classroomProblem(data, c.lesson.LessonID, event)
-			if !ok {
-				return nil
+			if err == nil {
+				c.data = data
+				p, ok = classroomProblem(data, c.lesson.LessonID, event)
 			}
 		}
+		if !ok {
+			// The lesson is a v3 live lesson whose presentation API needs a lesson
+			// token. Keep the timeline event so it can still be announced, without
+			// guessing options or answer state.
+			p = detectedProblem(c.lesson.LessonID, event)
+			ok = p.ID != ""
+		}
+		if ok {
+			c.mu.Lock()
+			c.problems[p.ID] = p
+			c.signalLocked()
+			c.mu.Unlock()
+			callback(p) // Starts analysis immediately, before timing lookup.
+			choice = p.Choice()
+		}
+	} else {
 		c.mu.Lock()
-		c.problems[p.ID] = p
-		c.signalLocked()
+		choice = c.problems[event.Prob.String()].Choice()
 		c.mu.Unlock()
-		callback(p) // Starts analysis immediately, before timing lookup.
+	}
+	if !choice {
+		// A detect-only problem has no options and no submission path, so the
+		// timing round trip would add no capability.
+		return nil
 	}
 	_, err := c.askTiming(ctx, event.Prob.String(), false)
 	return err
 }
 
+// detectedProblem preserves the identity and deadline of a live problem whose
+// slide payload is unavailable. It is never answerable through this struct.
+func detectedProblem(lessonID string, event rainTimelineProblem) ClassroomProblem {
+	p := ClassroomProblem{LessonID: lessonID, ID: event.Prob.String(), PresentationID: event.Pres.String()}
+	if event.DT >= 946684800000 && event.DT <= 4102444800000 {
+		p.StartedAt = time.UnixMilli(event.DT)
+	}
+	if event.Limit != nil && *event.Limit > 0 && !p.StartedAt.IsZero() {
+		p.Deadline = p.StartedAt.Add(time.Duration(*event.Limit) * time.Second)
+	}
+	return p
+}
+
 func classroomProblem(data rainClassroomData, lessonID string, event rainTimelineProblem) (ClassroomProblem, bool) {
 	for _, pres := range data.Presentations {
-		if pres.ID != event.Pres {
+		if pres.ID.String() != event.Pres.String() {
 			continue
 		}
 		for index, slide := range pres.Slides {
 			if event.SID != "" && event.SID != "0" {
-				if slide.ID != event.SID {
+				if slide.ID.String() != event.SID.String() {
 					continue
 				}
 			} else if index+1 != event.Index {
 				continue
 			}
 			problem := slide.Problem
-			if problem == nil || problem.ID != event.Prob {
+			if problem == nil || problem.ID.String() != event.Prob.String() {
 				return ClassroomProblem{}, false
 			}
 			p := ClassroomProblem{LessonID: lessonID, ID: problem.ID.String(), PresentationID: pres.ID.String(), Title: pres.Title, Body: problem.Body, ImageURL: slide.Cover, Type: problem.Type}
@@ -419,7 +529,7 @@ func (c *LiveClassroom) askTiming(ctx context.Context, id string, fresh bool) (*
 	request := &rainTimingRequest{id: c.timingID, sentAt: sentAt, revision: c.revision[id], requireID: fresh, done: make(chan struct{})}
 	c.timing[id] = request
 	c.mu.Unlock()
-	if err := wsjson.Write(ctx, c.conn, map[string]any{"op": "probleminfo", "lessonid": json.Number(c.lesson.LessonID), "problemid": json.Number(id), "msgid": request.id}); err != nil {
+	if err := wsjson.Write(ctx, c.conn, map[string]any{"op": "probleminfo", "lessonid": c.lesson.LessonID, "problemid": id, "msgid": request.id}); err != nil {
 		c.Close()
 		return nil, errors.New("课堂倒计时查询失败")
 	}
@@ -471,13 +581,13 @@ func (c *LiveClassroom) CurrentProblem(ctx context.Context, id string) (Classroo
 	if err != nil {
 		return ClassroomProblem{}, err
 	}
-	event := rainTimelineProblem{Prob: json.Number(id), Pres: json.Number(p.PresentationID)}
+	event := rainTimelineProblem{Prob: rainID(id), Pres: rainID(p.PresentationID)}
 	// Locate the exact problem without relying on its old slide position.
 	for _, pres := range data.Presentations {
-		if pres.ID == event.Pres {
+		if pres.ID.String() == event.Pres.String() {
 			for i, slide := range pres.Slides {
 				if slide.Problem != nil && slide.Problem.ID.String() == id {
-					event.SID = slide.ID
+					event.SID = rainID(slide.ID.String())
 					event.Index = i + 1
 				}
 			}

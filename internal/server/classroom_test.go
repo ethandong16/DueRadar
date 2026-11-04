@@ -47,6 +47,7 @@ func prepareClassroom(t *testing.T, s *Server, fallback, analysis bool, channel 
 	t.Helper()
 	settings := s.Engine.Snapshot().Settings
 	settings.RainFallbackEnabled, settings.RainAnalysisEnabled = fallback, analysis
+	settings.InClassEnabled = false // These tests isolate the assistant action paths.
 	if err := s.Engine.UpdateSettings(settings); err != nil {
 		t.Fatal(err)
 	}
@@ -279,6 +280,42 @@ func TestClassroomAnalysisImmediateOnceAndNeverSubmitsModelAnswer(t *testing.T) 
 	}
 }
 
+func TestClassroomTimelineProblemNotifiesWithoutSlideOptions(t *testing.T) {
+	s, _ := testApp(t)
+	w := prepareClassroom(t, s, false, false, &fakeClassroom{})
+	settings := s.Engine.Snapshot().Settings
+	settings.InClassEnabled = true
+	if err := s.Engine.UpdateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	var pushes atomic.Int32
+	var mu sync.Mutex
+	var gotTitle, gotBody string
+	s.sendBark = func(_ context.Context, _, _, title, body string) error {
+		mu.Lock()
+		gotTitle, gotBody = title, body
+		mu.Unlock()
+		pushes.Add(1)
+		return nil
+	}
+	now := time.Now()
+	// v3 lessons expose the live timeline but not the slide payload. Detection
+	// must still announce the problem so the student can open Rain Classroom.
+	p := platform.ClassroomProblem{LessonID: "10", ID: "50", StartedAt: now, Deadline: now.Add(45 * time.Second)}
+	s.observeClassroomProblem(w, p)
+	eventually(t, func() bool { return pushes.Load() == 1 })
+	mu.Lock()
+	title, body := gotTitle, gotBody
+	mu.Unlock()
+	if !strings.Contains(title, "课上答题") || !strings.Contains(body, "随堂习题") || !strings.Contains(body, "打开雨课堂") {
+		t.Fatalf("title=%q body=%q", title, body)
+	}
+	s.observeClassroomProblem(w, p)
+	if pushes.Load() != 1 {
+		t.Fatal("duplicate in-class notification")
+	}
+}
+
 func TestClassroomStaleAnalysisCannotNotify(t *testing.T) {
 	for _, mode := range []string{"disable", "model change", "rebind", "closed"} {
 		t.Run(mode, func(t *testing.T) {
@@ -392,7 +429,7 @@ func TestClassroomClosedProblemCancelsQueuedAnalysis(t *testing.T) {
 	}
 }
 
-func TestClassroomDiscoveryDefaultOffAndStudentOnly(t *testing.T) {
+func TestClassroomDiscoveryAllOffAndInClassOnlyStudent(t *testing.T) {
 	s, _ := testApp(t)
 	var discoveries, opened atomic.Int32
 	s.newRain = func(string) rainAdapter {
@@ -404,12 +441,18 @@ func TestClassroomDiscoveryDefaultOffAndStudentOnly(t *testing.T) {
 	if err := s.Vault.Update(func(c *vault.Config) error { c.RainCookie = "sessionid=test"; return nil }); err != nil {
 		t.Fatal(err)
 	}
+	settings := s.Engine.Snapshot().Settings
+	settings.InClassEnabled, settings.RainFallbackEnabled, settings.RainAnalysisEnabled = false, false, false
+	if err := s.Engine.UpdateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
 	s.checkClassrooms(s.lifetime)
 	if discoveries.Load() != 0 {
-		t.Fatal("disabled assistants opened live monitor")
+		t.Fatal("all-disabled monitor contacted Rain")
 	}
-	settings := s.Engine.Snapshot().Settings
-	settings.RainFallbackEnabled = true
+	// In-class notifications alone must open the read-only live channel; the
+	// assistant toggles are no longer a prerequisite.
+	settings.InClassEnabled = true
 	if err := s.Engine.UpdateSettings(settings); err != nil {
 		t.Fatal(err)
 	}

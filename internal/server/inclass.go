@@ -67,6 +67,19 @@ func (s *Server) inClassInterval() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+// inClassLivePoll is the ceiling while a lesson is live. Slide quizzes are
+// often answerable for only 30-60 seconds, so the configured cadence (which
+// also governs idle checks) is shortened for the duration of the class.
+const inClassLivePoll = 5 * time.Second
+
+func (s *Server) inClassLoopInterval() time.Duration {
+	delay := s.inClassInterval()
+	if len(s.inClassSnapshot().Lessons) > 0 && delay > inClassLivePoll {
+		delay = inClassLivePoll
+	}
+	return delay
+}
+
 // runInClass keeps a light polling loop that only works while a Rain lesson is
 // live. It is deliberately separate from the 15-minute task sync so a quiz can
 // be reported within seconds without increasing full synchronizations.
@@ -81,7 +94,7 @@ func (s *Server) runInClass(ctx context.Context) {
 		case <-timer.C:
 		}
 		s.checkInClass(ctx)
-		delay = s.inClassInterval()
+		delay = s.inClassLoopInterval()
 	}
 }
 

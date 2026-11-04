@@ -69,7 +69,7 @@ func (s *Server) classroomCurrentLocked(w *classroomWatch) bool {
 	settings := s.Engine.Snapshot().Settings
 	return w.ctx.Err() == nil && s.lifetime.Err() == nil && w.generation == s.rainGeneration && w.epoch == s.classroomEpoch &&
 		s.rainState != "initializing" && s.rainState != "waiting" && s.Vault.Get().RainCookie == w.cookie &&
-		(settings.RainFallbackEnabled || settings.RainAnalysisEnabled)
+		(settings.InClassEnabled || settings.RainFallbackEnabled || settings.RainAnalysisEnabled)
 }
 
 func (s *Server) classroomCurrent(w *classroomWatch) bool {
@@ -90,7 +90,7 @@ func (s *Server) runClassrooms(ctx context.Context) {
 		case <-timer.C:
 		}
 		s.checkClassrooms(ctx)
-		interval := s.inClassInterval()
+		interval := s.inClassLoopInterval()
 		if interval > 20*time.Second {
 			interval = 20 * time.Second
 		}
@@ -102,7 +102,7 @@ func (s *Server) checkClassrooms(ctx context.Context) {
 	s.rainMu.Lock()
 	settings := s.Engine.Snapshot().Settings
 	generation, epoch, cookie := s.rainGeneration, s.classroomEpoch, s.Vault.Get().RainCookie
-	if s.Demo || ctx.Err() != nil || s.lifetime.Err() != nil || (!settings.RainFallbackEnabled && !settings.RainAnalysisEnabled) || cookie == "" || s.rainState == "waiting" || s.rainState == "initializing" {
+	if s.Demo || ctx.Err() != nil || s.lifetime.Err() != nil || (!settings.InClassEnabled && !settings.RainFallbackEnabled && !settings.RainAnalysisEnabled) || cookie == "" || s.rainState == "waiting" || s.rainState == "initializing" {
 		s.invalidateClassroomsLocked()
 		s.rainMu.Unlock()
 		return
@@ -310,7 +310,7 @@ func (s *Server) classroomError(w *classroomWatch, message string) {
 }
 
 func (s *Server) observeClassroomProblem(w *classroomWatch, p platform.ClassroomProblem) {
-	if p.ID == "" || p.LessonID != w.lesson.LessonID || !p.Choice() {
+	if p.ID == "" || p.LessonID != w.lesson.LessonID {
 		return
 	}
 	s.rainMu.Lock()
@@ -332,14 +332,62 @@ func (s *Server) observeClassroomProblem(w *classroomWatch, p platform.Classroom
 	close(w.changed)
 	w.changed = make(chan struct{})
 	settings := s.Engine.Snapshot().Settings
-	if settings.RainFallbackEnabled && !w.fallbacks[p.ID] {
+	if settings.RainFallbackEnabled && p.Choice() && !w.fallbacks[p.ID] {
 		w.fallbacks[p.ID] = true
 		s.startJob(func(context.Context) { s.runFallback(w, p.ID) })
 	}
-	if settings.RainAnalysisEnabled && !seen && !p.Answered && !p.Closed && !p.StartedAt.IsZero() && time.Since(p.StartedAt) >= -time.Minute && time.Since(p.StartedAt) < 2*time.Minute {
+	if settings.RainAnalysisEnabled && p.Choice() && !seen && !p.Answered && !p.Closed && !p.StartedAt.IsZero() && time.Since(p.StartedAt) >= -time.Minute && time.Since(p.StartedAt) < 2*time.Minute {
 		s.startJob(func(context.Context) { s.runAnalysis(w, p) })
 	}
+	now := time.Now()
+	notify := settings.InClassEnabled && !seen && !p.Closed && !p.StartedAt.IsZero() &&
+		!p.StartedAt.Before(now.Add(-inClassNotifyWindow)) && !p.StartedAt.After(now.Add(time.Minute))
+	item := core.InClassQuiz{}
+	if notify {
+		title := strings.TrimSpace(p.Title)
+		if title == "" {
+			title = "课堂习题"
+		}
+		item = core.InClassQuiz{
+			ClassroomID: w.lesson.ClassroomID,
+			ActivityID:  "classroom:" + p.ID,
+			Course:      w.lesson.CourseName,
+			Title:       title,
+			Body:        inClassProblemBody(w.lesson, p, settings.Timezone),
+			Notify:      true,
+		}
+	}
 	s.rainMu.Unlock()
+	if !notify {
+		return
+	}
+	added, err := s.Engine.ReportInClass(core.PlatformRain, []core.InClassQuiz{item}, now)
+	if err != nil {
+		s.classroomError(w, "课上答题记录保存失败")
+		return
+	}
+	if added > 0 {
+		// Bark delivery may take seconds; never block the socket reader that still
+		// has to process extend/close messages for the same problem.
+		s.startJob(func(context.Context) { s.deliverInClass(w.ctx, w.generation, w.cookie) })
+	}
+}
+
+func inClassProblemBody(lesson platform.LiveLesson, p platform.ClassroomProblem, timezone string) string {
+	parts := []string{lesson.CourseName}
+	if lesson.ClassroomName != "" && lesson.ClassroomName != lesson.CourseName {
+		parts[0] = lesson.CourseName + " · " + lesson.ClassroomName
+	}
+	parts = append(parts, "课堂发布了新的随堂习题")
+	if !p.Deadline.IsZero() {
+		location, err := time.LoadLocation(timezone)
+		if err != nil {
+			location = time.UTC
+		}
+		parts = append(parts, "限时截止 "+p.Deadline.In(location).Format("15:04:05"))
+	}
+	parts = append(parts, "打开雨课堂立即作答")
+	return strings.Join(parts, "\n")
 }
 
 func (s *Server) runFallback(w *classroomWatch, id string) {

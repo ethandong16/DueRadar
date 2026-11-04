@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -139,28 +138,62 @@ func TestClassroomTimingUsesServerClockAndConservativeRTT(t *testing.T) {
 	}
 }
 
-func TestOpenClassroomRejectsNonStudentsAndUnsupportedBootstrap(t *testing.T) {
-	var requests atomic.Int32
+func TestOpenClassroomRejectsNonStudentsAndKeepsReadOnlyHandshake(t *testing.T) {
+	var infoCalls atomic.Int32
 	r := rainTestClient(t, func(w http.ResponseWriter, req *http.Request) {
-		requests.Add(1)
-		if req.Method != "GET" || req.URL.Path != "/v/lesson/lesson_info_v2" {
+		switch req.URL.Path {
+		case "/v/lesson/lesson_info_v2":
+			// v3 lessons no longer serve the legacy presentation bootstrap.
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"errorcode":500,"errormsg":"'NoneType' object has no attribute 'set_cookie'"}`)
+		case "/api/v3/user/basic-info":
+			infoCalls.Add(1)
+			fmt.Fprint(w, `{"code":0,"data":{"id":"7"}}`)
+		case "/wsapp/":
+			conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{InsecureSkipVerify: true})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer conn.CloseNow()
+			var hello map[string]json.RawMessage
+			if err := wsjson.Read(req.Context(), conn, &hello); err != nil {
+				t.Error(err)
+				return
+			}
+			if string(hello["op"]) != `"hello"` || string(hello["role"]) != `"student"` {
+				t.Errorf("wrong student handshake: %v", hello)
+			}
+			// A numeric lesson id loses precision server-side and is answered as
+			// lessonfinished. The read-only handshake must send the string form and
+			// must not carry a lesson token.
+			if string(hello["lessonid"]) != `"1811530394936651392"` || string(hello["auth"]) != "0" {
+				t.Errorf("unsafe handshake: %v", hello)
+			}
+			if string(hello["userid"]) != `"7"` {
+				t.Errorf("missing read-only user id: %v", hello)
+			}
+		default:
 			t.Errorf("unexpected write/endpoint: %s %s", req.Method, req.URL.Path)
 		}
-		fmt.Fprint(w, `{"code":0,"data":{"lessonToken":"not-legacy"}}`)
 	})
 	for _, role := range []int{0, 1, 2, 4} {
 		if c, err := r.OpenClassroom(context.Background(), LiveLesson{LessonID: "10", ClassroomID: "100", Role: role}); err == nil || c != nil {
 			t.Fatal("opened a nonstudent classroom")
 		}
 	}
-	if requests.Load() != 0 {
+	if infoCalls.Load() != 0 {
 		t.Fatal("nonstudent guard performed I/O")
 	}
-	if _, err := r.OpenClassroom(context.Background(), LiveLesson{LessonID: "10", ClassroomID: "100", Role: 5}); err == nil || !strings.Contains(err.Error(), "不会自动签到") {
-		t.Fatal("unsupported bootstrap did not fail read-only")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := r.OpenClassroom(ctx, LiveLesson{LessonID: "1811530394936651392", ClassroomID: "100", Role: 5})
+	if err != nil || c == nil {
+		t.Fatalf("read-only live socket did not open: %v", err)
 	}
-	if requests.Load() != 1 {
-		t.Fatal("attempted a check-in/bootstrap fallback")
+	c.Close()
+	if infoCalls.Load() != 1 {
+		t.Fatal("missing read-only user id fallback")
 	}
 }
 
@@ -270,6 +303,9 @@ func openClassroomSocket(t *testing.T, answered *atomic.Bool) (*LiveClassroom, *
 	if string(hello["op"]) != `"hello"` || string(hello["role"]) != `"student"` {
 		t.Fatal("wrong student handshake")
 	}
+	if string(hello["lessonid"]) != `"10"` {
+		t.Fatal("lesson id must be sent as a string")
+	}
 	return c, peer, requests, ctx
 }
 
@@ -345,6 +381,81 @@ func TestClassroomPreflightRequiresItsOwnTimingReply(t *testing.T) {
 	}
 }
 
+// v3 live lessons reject the legacy presentation bootstrap and send every
+// timeline identifier as a string. Detection must survive both facts.
+func TestClassroomSocketV3StringTimelineWithoutBootstrap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	peers := make(chan *websocket.Conn, 1)
+	requests := make(chan map[string]json.RawMessage, 8)
+	r := rainTestClient(t, func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/v/lesson/lesson_info_v2":
+			fmt.Fprint(w, `{"errorcode":500,"errormsg":"'NoneType' object has no attribute 'set_cookie'"}`)
+		case "/api/v3/user/basic-info":
+			fmt.Fprint(w, `{"code":0,"data":{"id":"96351415"}}`)
+		case "/wsapp/":
+			conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{InsecureSkipVerify: true})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer conn.CloseNow()
+			peers <- conn
+			for {
+				var msg map[string]json.RawMessage
+				if err := wsjson.Read(ctx, conn, &msg); err != nil {
+					return
+				}
+				select {
+				case requests <- msg:
+				case <-ctx.Done():
+					return
+				}
+			}
+		default:
+			t.Errorf("unexpected endpoint %s", req.URL.Path)
+			http.NotFound(w, req)
+		}
+	})
+	c, err := r.OpenClassroom(ctx, LiveLesson{LessonID: "1811530394936651392", ClassroomID: "31739239", Role: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	peer := <-peers
+	hello := socketRequest(t, ctx, requests)
+	if string(hello["lessonid"]) != `"1811530394936651392"` || string(hello["auth"]) != "0" || string(hello["userid"]) != `"96351415"` {
+		t.Fatalf("unsafe v3 handshake: %v", hello)
+	}
+	observed := make(chan ClassroomProblem, 4)
+	done := make(chan struct{})
+	go func() { defer close(done); _ = c.Run(ctx, func(p ClassroomProblem) { observed <- p }) }()
+	defer func() { c.Close(); <-done }()
+	now := time.Now().UnixMilli()
+	socketWrite(t, ctx, peer, map[string]any{"op": "hello", "timeline": []any{
+		map[string]any{"type": "problem", "prob": "1811535912124093961", "pres": "1811535912082150912", "sid": "1811535912124093961", "dt": now, "limit": 60},
+	}})
+	p := <-observed
+	if p.ID != "1811535912124093961" || p.PresentationID != "1811535912082150912" || p.StartedAt.IsZero() || p.Deadline.Sub(p.StartedAt) != time.Minute || p.Choice() {
+		t.Fatalf("unexpected detect-only problem: %+v", p)
+	}
+	socketWrite(t, ctx, peer, map[string]any{"op": "unlockproblem", "problem": map[string]any{
+		"prob": "1811535912124093962", "pres": "1811535912082150912", "sid": "1811535912124093962", "dt": now, "limit": 45,
+	}})
+	p = <-observed
+	if p.ID != "1811535912124093962" || p.Deadline.Sub(p.StartedAt) != 45*time.Second {
+		t.Fatalf("unexpected live push problem: %+v", p)
+	}
+	// No presentation content means no answer submission path; the reader must
+	// not send a timing query for a problem it cannot act on.
+	select {
+	case extra := <-requests:
+		t.Fatalf("unexpected socket request: %v", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestClassroomProblemCollectionIsBounded(t *testing.T) {
 	c := &LiveClassroom{problems: make(map[string]ClassroomProblem)}
 	for i := range 200 {
@@ -373,7 +484,7 @@ func TestClassroomSocketFreshPreflightAndStateRevisions(t *testing.T) {
 				map[string]any{"type": "problem", "prob": 40, "pres": 20, "sid": 30, "dt": now - 50_000},
 			}})
 			initial := socketRequest(t, ctx, requests)
-			if string(initial["op"]) != `"probleminfo"` || string(initial["problemid"]) != "40" {
+			if string(initial["op"]) != `"probleminfo"` || string(initial["problemid"]) != `"40"` {
 				t.Fatal("wrong live problem query")
 			}
 			socketWrite(t, ctx, peer, map[string]any{"op": "probleminfo", "problemid": 40, "dt": now - 50_000, "now": now, "limit": 60})
@@ -398,7 +509,7 @@ func TestClassroomSocketFreshPreflightAndStateRevisions(t *testing.T) {
 			preflight := make(chan preflightResult, 1)
 			go func() { p, err := c.CurrentProblem(ctx, "40"); preflight <- preflightResult{p, err} }()
 			query := socketRequest(t, ctx, requests)
-			if string(query["problemid"]) != "40" {
+			if string(query["problemid"]) != `"40"` {
 				t.Fatal("preflight reused an obsolete result")
 			}
 			switch mode {
