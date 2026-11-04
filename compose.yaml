@@ -9,6 +9,9 @@ services:
       # 从 .env 读取注册策略；请显式设置 true 或 false。
       DUERADAR_ALLOW_REGISTRATION: ${DUERADAR_ALLOW_REGISTRATION:-}
       DUERADAR_SECURE_COOKIES: ${DUERADAR_SECURE_COOKIES:-false}
+      # 可选：知到自动续期从只读短信模块读取验证码。
+      DUERADAR_SMS_API_URL: ${DUERADAR_SMS_API_URL:-}
+      DUERADAR_SMS_API_TOKEN: ${DUERADAR_SMS_API_TOKEN:-}
     volumes:
       - dueradar-data:/data
     read_only: true

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#17271f">
+  <meta name="robots" content="noindex">
+  <title>知到滑块验证 · DueRadar</title>
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    body { background: var(--paper); color: var(--ink); }
+    .slide-wrap { max-width: 520px; margin: 0 auto; padding: 24px 18px 48px; }
+    .slide-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+    .slide-head h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; }
+    .slide-head a { color: var(--muted); text-decoration: none; font-size: 13px; }
+    .slide-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; }
+    .slide-lede { margin: 0 0 14px; color: var(--ink-2); font-size: 13.5px; line-height: 1.7; }
+    .slide-lede strong { color: var(--ink); font-weight: 600; }
+    .slide-slot { min-height: 88px; display: flex; align-items: center; justify-content: center; }
+    .slide-status { margin: 16px 0 0; font-size: 13px; color: var(--muted); min-height: 20px; }
+    .slide-status[data-kind="ok"] { color: var(--moss); }
+    .slide-status[data-kind="error"] { color: var(--danger); }
+    .slide-foot { margin-top: 22px; font-size: 12px; color: var(--faint); line-height: 1.7; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #12140f; color: var(--cream); }
+      .slide-card { background: #1a1d17; border-color: #2b3026; }
+      .slide-lede { color: #c9c5b7; }
+      .slide-lede strong { color: #f4f0e4; }
+    }
+  </style>
+</head>
+<body>
+  <main class="slide-wrap">
+    <div class="slide-head">
+      <h1>知到滑块验证</h1>
+      <a href="/">返回 DueRadar</a>
+    </div>
+    <section class="slide-card">
+      <p class="slide-lede">账号和密码已从本机加密存储读取，<strong>无需输入</strong>。滑一次验证码即可完成知到登录。</p>
+      <div id="slide-slot" class="slide-slot"></div>
+      <p id="slide-status" class="slide-status" role="status" aria-live="polite">正在加载验证码…</p>
+    </section>
+    <p class="slide-foot">验证码由网易易盾提供。验证结果只用于本次登录，密码不会被发送到浏览器。</p>
+  </main>
+  <script src="https://cstaticdun.126.net/load.min.js"></script>
+  <script>
+    (function () {
+      var slot = document.getElementById('slide-slot');
+      var status = document.getElementById('slide-status');
+      function setStatus(text, kind) {
+        status.textContent = text;
+        if (kind) status.dataset.kind = kind; else delete status.dataset.kind;
+      }
+      function fail(text) { setStatus(text, 'error'); }
+
+      fetch('/api/zhidao', { credentials: 'same-origin' })
+        .then(function (res) {
+          if (res.status === 401) { fail('管理会话已过期，请先返回首页登录。'); return null; }
+          if (!res.ok) { fail('读取登录状态失败，请刷新重试。'); return null; }
+          return res.json();
+        })
+        .then(function (view) {
+          if (!view) return;
+          if (!view.configured) { fail('还没有保存知到手机号和密码，请先在「账号」页保存。'); return; }
+          if (typeof initNECaptcha !== 'function') { fail('验证码组件加载失败，请检查网络后刷新。'); return; }
+          setStatus('请完成下方滑块验证。');
+          var width = Math.min(Math.max(window.innerWidth - 84, 240), 380) + 'px';
+          initNECaptcha({
+            element: '#slide-slot',
+            captchaId: view.captcha_id,
+            mode: 'embed',
+            width: width,
+            lang: 'zh-CN',
+            onVerify: function (err, data) {
+              if (err || !data || !data.validate) { fail('验证未通过，请再滑一次。'); return; }
+              setStatus('验证通过，正在用已保存的账号登录知到…');
+              fetch('/api/zhidao/slider', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'X-DueRadar': '1' },
+                body: JSON.stringify({ validate: data.validate })
+              }).then(function (res) {
+                return res.json().catch(function () { return {}; }).then(function (body) {
+                  if (res.ok && body.ok !== false) { setStatus(body.message || '知到登录成功，可以关闭此页。', 'ok'); return; }
+                  fail(body.error || ('知到登录失败（HTTP ' + res.status + '），请重试。'));
+                });
+              }).catch(function () { fail('网络异常，登录未完成，请重试。'); });
+            }
+          }, function () {}, function (initErr) {
+            fail('验证码加载失败' + (initErr && initErr.msg ? '：' + initErr.msg : '') + '，请刷新重试。');
+          });
+        })
+        .catch(function () { fail('网络异常，请刷新重试。'); });
+    })();
+  </script>
+</body>
+</html>

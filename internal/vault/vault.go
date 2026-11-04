@@ -18,6 +18,8 @@ type Config struct {
 	BarkKey        string `json:"bark_key"`
 	RainCookie     string `json:"rain_cookie,omitempty"`
 	ZhidaoSession  string `json:"zhidao_session,omitempty"`
+	ZhidaoPhone    string `json:"zhidao_phone,omitempty"`
+	ZhidaoPassword string `json:"zhidao_password,omitempty"`
 	AnalysisAPIKey string `json:"analysis_api_key,omitempty"`
 	AnalysisModel  string `json:"analysis_model,omitempty"`
 }

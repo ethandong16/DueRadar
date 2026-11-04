@@ -379,6 +379,7 @@ func (m *MultiServer) Handler(files fs.FS) http.Handler {
 	m.mu.Unlock()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setMultiSecurityHeaders(w)
+		applySliderSecurity(w, r.URL.Path)
 		if r.URL.Path == "/healthz" {
 			jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 			return

@@ -211,6 +211,12 @@ func (e *Engine) SetAccount(a Account) error {
 		old := s.Accounts[i]
 		// Binding changes never manufacture a successful task synchronization.
 		old.LoginState = a.LoginState
+		// A successful login supersedes the previous failure diagnostic. Callers
+		// such as the automatic renewal flow set logged_in before the follow-up
+		// sync, so the stale "session expired" message must not survive it.
+		if a.LoginState == "logged_in" {
+			old.LastError = ""
+		}
 		if a.LastError != "" {
 			old.LastError = a.LastError
 		}

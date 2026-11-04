@@ -23,8 +23,9 @@ type staticAsset struct {
 func staticHandler(files fs.FS) http.Handler {
 	assets := make(map[string]staticAsset)
 	for name, contentType := range map[string]string{
-		"index.html": "text/html; charset=utf-8",
-		"app.js":     "text/javascript; charset=utf-8",
+		"index.html":  "text/html; charset=utf-8",
+		"slider.html": "text/html; charset=utf-8",
+		"app.js":      "text/javascript; charset=utf-8",
 		"tasks.js":   "text/javascript; charset=utf-8",
 		"theme.js":   "text/javascript; charset=utf-8",
 		"style.css":  "text/css; charset=utf-8",

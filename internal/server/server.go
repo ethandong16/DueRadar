@@ -42,6 +42,15 @@ type Server struct {
 	zhidaoSyncCancel    context.CancelFunc
 	startZhidao         func(context.Context) (*rainFlow, error)
 	newZhidao           func(string) rainAdapter
+	zhidaoAutoMu        sync.Mutex
+	zhidaoAutoState     string
+	zhidaoAutoStage     string
+	zhidaoAutoError     string
+	zhidaoAutoAt        *time.Time
+	zhidaoAutoAttempt   time.Time
+	smsSource           smsSource
+	passwordLogin       func(context.Context, string, string, platform.SMSCollector) (string, error)
+	slideLogin          func(context.Context, string, string, string, platform.SMSCollector) (string, error)
 
 	Engine            *core.Engine
 	Vault             *vault.Vault
@@ -97,7 +106,8 @@ func New(engine *core.Engine, credentials *vault.Vault, password string, demo, s
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{Engine: engine, Vault: credentials, Demo: demo, SecureCookies: secure, password: sha256.Sum256([]byte(password)), started: time.Now(), sessions: map[string]session{}, attempts: map[string]attempt{}, syncGate: make(chan struct{}, 1), lifetime: ctx, lifetimeCancel: cancel,
 		classrooms: make(map[string]*classroomWatch), openClassroom: defaultOpenClassroom, analysisGate: make(chan struct{}, 1), analyzeProblem: defaultAnalyzeProblem,
-		startZhidao: defaultZhidaoFlow, newZhidao: func(session string) rainAdapter { return platform.NewZhidao(session) }, startRain: defaultRainFlow, newRain: func(cookie string) rainAdapter { return platform.NewRain(cookie) }, sendBark: bark.Send}, nil
+		startZhidao: defaultZhidaoFlow, newZhidao: func(session string) rainAdapter { return platform.NewZhidao(session) }, startRain: defaultRainFlow, newRain: func(cookie string) rainAdapter { return platform.NewRain(cookie) }, sendBark: bark.Send,
+		smsSource: newSMSSourceFromEnv(), passwordLogin: platform.PasswordLogin, slideLogin: platform.SlideLogin}, nil
 }
 
 func (s *Server) Handler(files fs.FS) http.Handler {
@@ -131,6 +141,10 @@ func (s *Server) handler(static http.Handler) http.Handler {
 	mux.HandleFunc("POST /api/accounts/zhidao/login", s.protected(s.startZhidaoLogin))
 	mux.HandleFunc("GET /api/accounts/zhidao/login", s.protected(s.zhidaoLoginStatus))
 	mux.HandleFunc("POST /api/accounts/zhidao/login/cancel", s.protected(s.cancelZhidaoLogin))
+	mux.HandleFunc("GET /api/zhidao", s.protected(s.getZhidaoAutoLogin))
+	mux.HandleFunc("PUT /api/zhidao/auto-login", s.protected(s.setZhidaoAutoLogin))
+	mux.HandleFunc("POST /api/zhidao/auto-login/test", s.protected(s.testZhidaoAutoLogin))
+	mux.HandleFunc("POST /api/zhidao/slider", s.protected(s.slideZhidaoLogin))
 	mux.HandleFunc("GET /api/accounts/rain/login", s.protected(s.rainLoginStatus))
 	mux.HandleFunc("POST /api/accounts/rain/login/cancel", s.protected(s.cancelRainLogin))
 	mux.HandleFunc("POST /api/accounts/rain/assist", s.protected(s.startRainAssist))
@@ -163,6 +177,7 @@ func (s *Server) handler(static http.Handler) http.Handler {
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("Cache-Control", "no-store")
+		applySliderSecurity(w, r.URL.Path)
 		if r.Method != "GET" && r.Method != "HEAD" {
 			// Reject cross-site browser mutations, including login CSRF. CLI calls
 			// without Origin are allowed; authenticated cookies remain mandatory.
@@ -710,6 +725,28 @@ func (s *Server) Run(ctx context.Context) {
 	})
 	s.startJob(s.runInClass)
 	s.startJob(s.runClassrooms)
+	s.startJob(func(ctx context.Context) {
+		// Give the startup sync a moment to validate or rotate the stored
+		// session before the renewal check decides it is near expiry.
+		startup := time.NewTimer(30 * time.Second)
+		select {
+		case <-ctx.Done():
+			startup.Stop()
+			return
+		case <-startup.C:
+		}
+		s.maybeAutoLoginZhidao()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.maybeAutoLoginZhidao()
+			}
+		}
+	})
 	<-s.lifetime.Done()
 	// The lifetime cancellation stops the ticker loops, but a platform request
 	// or final durable delivery may still be unwinding. Keep the worker alive

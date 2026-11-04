@@ -124,34 +124,13 @@ func (l *ZhidaoLogin) complete(ctx context.Context, once string) (string, error)
 	if resp.StatusCode != 200 {
 		return "", errors.New("知到登录确认失败")
 	}
-	session := ZhidaoSession{}
-	for _, name := range []string{"jt-cas", "ai-poly", "openapi-token", "cloudapi-token"} {
-		for _, origin := range []string{l.cloudBase, zhidaoCenter} {
-			u, _ := url.Parse(origin)
-			for _, c := range l.client.Jar.Cookies(u) {
-				if c.Name == name && c.Value != "" {
-					session.Token = c.Value
-					break
-				}
-			}
-			if session.Token != "" {
-				break
-			}
+	session, err := sessionFromJar(ctx, l.client, l.jar, l.cloudBase)
+	if err != nil {
+		if errors.Is(err, errNoZhidaoSession) {
+			return "", errors.New("知到扫码已确认，但课程中心会话尚未建立")
 		}
-		if session.Token != "" {
-			break
-		}
-	}
-	if session.Token == "" {
-		return "", errors.New("知到扫码已确认，但课程中心会话尚未建立")
-	}
-	if decoded, err := url.PathUnescape(session.Token); err == nil {
-		session.Token = decoded
-	}
-	if err := validateZhidao(ctx, l.client, l.cloudBase, &session); err != nil {
 		return "", err
 	}
-	session.Cookies = l.jar.snapshot()
 	data, err := json.Marshal(session)
 	return string(data), err
 }

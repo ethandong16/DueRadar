@@ -288,13 +288,42 @@
             <div class="page-head__text">
               <p class="eyebrow">接入 · 扫码</p>
               <h1>平台账号</h1>
-              <p class="page-head__lede">扫码一次，之后由设备独立同步；账号密码不经过本服务。</p>
+              <p class="page-head__lede">扫码绑定后由设备独立同步；默认不保存账号密码。知到自动续期开启后，手机号和密码只加密保存在本机。</p>
             </div>
           </header>
           <div class="banner info-banner">
-            <span>雨课堂使用微信扫码，知到使用 APP 扫码。会话加密保存在本机数据目录。</span>
+            <span>雨课堂使用微信扫码，知到使用 APP 扫码。会话与（如启用自动续期的）凭据均加密保存在本机数据目录。</span>
           </div>
           <div id="platform-list" class="platform-grid"></div>
+
+          <section class="panel zhidao-auto-panel" aria-labelledby="zhidao-auto-heading">
+            <div class="panel-heading">
+              <div>
+                <p class="section-index">知到 · 自动续期</p>
+                <h2 id="zhidao-auto-heading">登录自动续期</h2>
+                <p>知到会话固定 24 小时失效。开启后会在到期前用手机号、密码和短信验证码重新登录。</p>
+              </div>
+              <span id="zhidao-auto-badge" class="badge neutral">未启用</span>
+            </div>
+            <form id="zhidao-auto-form">
+              <label class="switch-label" for="zhidao-auto-enabled">
+                <span><strong>到期前自动重新登录</strong><small>约提前 1 小时，在旧会话失效前完成。</small></span>
+                <input id="zhidao-auto-enabled" type="checkbox" role="switch" aria-describedby="zhidao-auto-hint">
+              </label>
+              <label for="zhidao-phone">知到手机号</label>
+              <input id="zhidao-phone" type="tel" inputmode="numeric" autocomplete="off" maxlength="20" placeholder="13800000000">
+              <label for="zhidao-password">知到密码</label>
+              <input id="zhidao-password" type="password" autocomplete="new-password" maxlength="128" placeholder="留空保留已保存的密码">
+              <p class="field-hint" id="zhidao-auto-hint">密码使用数据目录中的主密钥加密保存，不会通过接口回传。短信模块地址和令牌需在部署环境中配置。知到要求滑块验证时，用手机打开「滑块续期」滑一次即可，无需重新输入账号密码。</p>
+              <p class="field-hint" id="zhidao-auto-status" role="status"></p>
+              <div class="form-actions">
+                <button class="button primary" type="submit">保存自动续期</button>
+                <button id="zhidao-auto-test" class="button secondary" type="button">立即测试登录</button>
+                <a class="button secondary" href="/slider.html" target="_blank" rel="noopener">滑块续期（手机）</a>
+                <button id="zhidao-auto-clear" class="button secondary" type="button">移除凭据</button>
+              </div>
+            </form>
+          </section>
         </section>
 
         <section id="view-settings" class="view" hidden>

@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -126,4 +127,48 @@ func (z *Zhidao) Credentials() (string, error) {
 	}
 	data, err := json.Marshal(session)
 	return string(data), err
+}
+
+// ZhidaoSessionExpiry reads the absolute expiry of the stored jt-cas JWT. The
+// other tokens in the same session share its server-side lifetime, so this is
+// the deadline the renewal scheduler must beat. It returns false when the
+// stored value predates the JWT format or cannot be decoded; callers must not
+// overwrite a session whose expiry is unknown.
+func ZhidaoSessionExpiry(serialized string) (time.Time, bool) {
+	if strings.TrimSpace(serialized) == "" {
+		return time.Time{}, false
+	}
+	var session ZhidaoSession
+	if json.Unmarshal([]byte(serialized), &session) != nil {
+		return time.Time{}, false
+	}
+	for _, record := range session.Cookies {
+		if record.Cookie != nil && record.Cookie.Name == "jt-cas" {
+			if expiry, ok := jwtExpiry(record.Cookie.Value); ok {
+				return expiry, true
+			}
+		}
+	}
+	return jwtExpiry(session.Token)
+}
+
+func jwtExpiry(token string) (time.Time, bool) {
+	if decoded, err := url.PathUnescape(token); err == nil {
+		token = decoded
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(raw, &claims) != nil || claims.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0), true
 }

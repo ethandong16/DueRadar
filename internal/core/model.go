@@ -42,6 +42,9 @@ type Settings struct {
 	// Both classroom assistants are opt-in and independent of reminder delivery.
 	RainFallbackEnabled bool `json:"rain_fallback_enabled"`
 	RainAnalysisEnabled bool `json:"rain_analysis_enabled"`
+	// ZhidaoAutoLogin renews the 24-hour Zhidao session before it expires. The
+	// phone and password live only in the encrypted vault.
+	ZhidaoAutoLogin bool `json:"zhidao_auto_login"`
 }
 
 // DefaultInClassPollSeconds keeps a live class responsive without hammering the

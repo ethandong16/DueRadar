@@ -1278,6 +1278,11 @@ progress.progress-track::-moz-progress-bar { background: var(--sky); border-radi
 .platform-card .button + .button { margin-top: 8px; }
 .assist-button { width: 100%; white-space: normal; }
 
+.zhidao-auto-panel { margin-top: 22px; }
+.zhidao-auto-panel form { padding: 4px 22px 22px; }
+.zhidao-auto-panel .switch-label { margin-bottom: 16px; }
+.zhidao-auto-panel .form-actions { margin-top: 16px; }
+
 /* ---------- Settings ---------- */
 
 .settings-grid {

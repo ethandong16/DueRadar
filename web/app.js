@@ -26,6 +26,7 @@
   let settingsDirty = false;
   let barkDirty = false;
   let analysisDirty = false;
+  let zhidaoDirty = false;
 
   function node(tag, className, content) {
     const result = document.createElement(tag);
@@ -104,9 +105,12 @@
     settingsDirty = false;
     barkDirty = false;
     analysisDirty = false;
+    zhidaoDirty = false;
     $("analysis-key").value = "";
     $("analysis-model").value = "";
     $("bark-key").value = "";
+    $("zhidao-phone").value = "";
+    $("zhidao-password").value = "";
     $("login-username").value = "";
     $("login-password").value = "";
     $("login-password-confirm").value = "";
@@ -547,6 +551,34 @@
     $("analysis-clear").disabled = analysisUnavailable || !analysisConfigured || $("analysis-clear").dataset.busy === "true";
     if (state.analysis && !analysisDirty) $("analysis-model").value = state.analysis.model || "claude-opus-5-5";
     $("analysis-key").placeholder = analysisConfigured ? "已保存，留空保留当前密钥" : "输入 Anthropic API Key";
+    const zhidao = state.zhidao;
+    const zhidaoConfigured = Boolean(zhidao?.configured);
+    $("zhidao-auto-badge").textContent = !zhidao ? "尚未加载" : !zhidao.sms_configured ? "短信模块未配置" : zhidao.enabled ? "已启用" : "未启用";
+    $("zhidao-auto-badge").className = `badge ${zhidao?.enabled ? "success" : "neutral"}`;
+    const zhidaoUnavailable = !zhidao || !state.runtime || state.demo;
+    if (zhidao && !zhidaoDirty) $("zhidao-auto-enabled").checked = Boolean(zhidao.enabled);
+    $("zhidao-auto-enabled").disabled = zhidaoUnavailable || !zhidao?.sms_configured;
+    $("zhidao-phone").disabled = zhidaoUnavailable;
+    $("zhidao-password").disabled = zhidaoUnavailable;
+    $("zhidao-phone").placeholder = zhidao?.phone ? `已保存 ${zhidao.phone}，留空沿用` : "13800000000";
+    $("zhidao-password").placeholder = zhidaoConfigured ? "已保存，留空保留当前密码" : "输入知到密码";
+    const zhidaoButton = $("zhidao-auto-form").querySelector("button[type=submit]");
+    zhidaoButton.disabled = zhidaoUnavailable || !zhidao?.sms_configured || zhidaoButton.dataset.busy === "true";
+    $("zhidao-auto-test").disabled = zhidaoUnavailable || !zhidaoConfigured || !zhidao?.sms_configured || zhidao?.state === "running" || $("zhidao-auto-test").dataset.busy === "true";
+    $("zhidao-auto-clear").disabled = zhidaoUnavailable || !zhidaoConfigured || $("zhidao-auto-clear").dataset.busy === "true";
+    if (zhidao) {
+      const stages = { starting: "准备登录", logging_in: "正在验证手机号与密码", waiting_sms: "等待短信验证码（最多 90 秒）" };
+      let text;
+      if (!zhidao.sms_configured) text = "短信模块未配置：部署时设置 DUERADAR_SMS_API_URL 与 DUERADAR_SMS_API_TOKEN 后才能启用。";
+      else if (!zhidaoConfigured) text = "尚未保存手机号和密码。";
+      else if (zhidao.state === "running") text = `正在自动登录知到：${stages[zhidao.stage] || "请稍候"}。`;
+      else if (zhidao.state === "failed") text = zhidao.error || "上次自动登录失败。";
+      else if (zhidao.state === "success") text = "上次自动登录成功，知到会话已更新。";
+      else text = "尚未执行过自动登录。";
+      if (zhidao.session_expires_at) text += ` 当前知到会话有效至 ${formatDate(zhidao.session_expires_at, true)}。`;
+      else if (zhidaoConfigured) text += " 当前会话没有可解析的到期时间。";
+      if ($("zhidao-auto-status").textContent !== text) $("zhidao-auto-status").textContent = text;
+    }
     $("runtime-grid").replaceChildren();
     const runtime = state.runtime || {};
     const uptime = Number.isFinite(runtime.uptime_seconds) ? `${Math.floor(runtime.uptime_seconds / 3600)} 小时 ${Math.floor(runtime.uptime_seconds % 3600 / 60)} 分钟` : "未知";
@@ -627,7 +659,7 @@
             const snapshot = { tasks: [], events: [], platforms: [], settings: null, bark: null, analysis: null, runtime: null, demo: false, user: session.user || currentUser, setup: session.setup || null, ...state };
             snapshot.user = session.user || currentUser;
             snapshot.setup = session.setup || null;
-            const sections = { tasks: "任务", events: "通知记录", accounts: "平台账号", settings: "提醒设置", bark: "Bark 配置", analysis: "AI 配置", status: "运行状态" };
+            const sections = { tasks: "任务", events: "通知记录", accounts: "平台账号", settings: "提醒设置", bark: "Bark 配置", analysis: "AI 配置", zhidao: "知到自动续期", status: "运行状态" };
             const pending = new Set(Object.keys(sections));
             const errors = new Map();
             let tasksReady = false;
@@ -708,6 +740,7 @@
   $("settings-form").addEventListener("input", () => { settingsDirty = true; });
   $("bark-form").addEventListener("input", () => { barkDirty = true; });
   $("analysis-form").addEventListener("input", () => { analysisDirty = true; });
+  $("zhidao-auto-form").addEventListener("input", () => { zhidaoDirty = true; });
   $("auth-login-mode").addEventListener("click", () => setAuthMode("login"));
   $("auth-register-mode").addEventListener("click", () => setAuthMode("register"));
   $("login-form").addEventListener("submit", async (event) => {
@@ -755,6 +788,34 @@
     analysisDirty = false; $("analysis-key").value = "";
     if (await refreshState()) notify("AI 密钥已移除，不再调用模型。");
   }));
+  $("zhidao-auto-form").addEventListener("submit", (event) => {
+    event.preventDefault(); busy(event.submitter || $("zhidao-auto-form").querySelector("button[type=submit]"), async () => {
+      if (!state?.zhidao || !state?.runtime) throw new Error("请等待知到自动续期状态加载完成后再保存。");
+      if (state.demo) throw new Error("演示模式不保存账号凭据。");
+      if (!state.zhidao.sms_configured) throw new Error("短信模块尚未配置，无法启用自动续期。");
+      const phone = $("zhidao-phone").value.trim();
+      const normalized = phone.replace(/[\s+]/g, "").replace(/^86/, "");
+      if (normalized && !/^1\d{10}$/.test(normalized)) throw new Error("请填写 11 位中国大陆手机号。");
+      const enabled = $("zhidao-auto-enabled").checked;
+      if (enabled && !normalized && !state.zhidao.configured) throw new Error("请填写手机号和密码。");
+      await api("/api/zhidao/auto-login", "PUT", { enabled, phone: normalized, password: $("zhidao-password").value });
+      zhidaoDirty = false; $("zhidao-password").value = "";
+      if (await refreshState()) notify("知到自动续期设置已保存。");
+    });
+  });
+  $("zhidao-auto-test").addEventListener("click", (event) => busy(event.currentTarget, async () => {
+    if (!state?.zhidao) throw new Error("请等待知到自动续期状态加载完成。");
+    const result = await api("/api/zhidao/auto-login/test", "POST", {});
+    notify(result.message || "正在登录知到，请留意短信。");
+    await refreshState();
+  }));
+  $("zhidao-auto-clear").addEventListener("click", (event) => busy(event.currentTarget, async () => {
+    if (!state?.zhidao?.configured) return;
+    await api("/api/zhidao/auto-login", "PUT", { clear: true });
+    zhidaoDirty = false;
+    $("zhidao-phone").value = ""; $("zhidao-password").value = ""; $("zhidao-auto-enabled").checked = false;
+    if (await refreshState()) notify("已移除保存的知到手机号和密码。");
+  }));
   $("bark-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/bark/test", "POST"); notify(result.message || "测试通知已发送。"); }));
   $("in-class-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/in-class/test", "POST"); notify(result.message || "测试通知已发送。"); }));
   $("settings-defaults").addEventListener("click", () => { populateSettings(defaults); settingsDirty = true; notify("已填入默认值，保存后生效。"); });
@@ -763,7 +824,7 @@
       if (!state?.settings || !state?.runtime) throw new Error("请等待提醒设置及运行状态加载完成后再保存。");
       const pollSeconds = Number.parseInt($("in-class-poll").value, 10);
       if (!Number.isInteger(pollSeconds) || pollSeconds < 10 || pollSeconds > 300) throw new Error("课上答题检查间隔请填写 10—300 秒。");
-      const settings = { deadline_minutes: parseMinutes("deadline-minutes", "截止提醒"), exam_start_minutes: parseMinutes("exam-minutes", "考试开始"), video_minutes: parseMinutes("video-minutes", "视频截止"), quiet_enabled: $("quiet-enabled").checked, quiet_start: $("quiet-start").value, quiet_end: $("quiet-end").value, timezone: $("timezone").value.trim(), in_class_enabled: $("in-class-enabled").checked, in_class_poll_seconds: pollSeconds, rain_fallback_enabled: $("rain-fallback-enabled").checked, rain_analysis_enabled: $("rain-analysis-enabled").checked };
+      const settings = { deadline_minutes: parseMinutes("deadline-minutes", "截止提醒"), exam_start_minutes: parseMinutes("exam-minutes", "考试开始"), video_minutes: parseMinutes("video-minutes", "视频截止"), quiet_enabled: $("quiet-enabled").checked, quiet_start: $("quiet-start").value, quiet_end: $("quiet-end").value, timezone: $("timezone").value.trim(), in_class_enabled: $("in-class-enabled").checked, in_class_poll_seconds: pollSeconds, rain_fallback_enabled: $("rain-fallback-enabled").checked, rain_analysis_enabled: $("rain-analysis-enabled").checked, zhidao_auto_login: Boolean(state.settings?.zhidao_auto_login) };
       try { new Intl.DateTimeFormat("zh-CN", { timeZone: settings.timezone }); } catch { throw new Error("请填写有效的 IANA 时区，例如 Asia/Shanghai。"); }
       if (settings.quiet_enabled && settings.quiet_start === settings.quiet_end) throw new Error("静默开始和结束时间应不同；全天接收提醒可关闭静默时段。");
       await api("/api/settings", "PUT", settings); settingsDirty = false; if (await refreshState()) notify("提醒规则已保存。");

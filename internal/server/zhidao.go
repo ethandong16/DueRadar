@@ -218,6 +218,9 @@ func (s *Server) syncZhidao(ctx context.Context) error {
 	adapter := s.newZhidao(cookie)
 	if err := adapter.Validate(ctx); err != nil {
 		_ = s.failZhidaoSync(ctx, generation, errors.Is(err, platform.ErrSessionExpired), "登录验证失败")
+		if errors.Is(err, platform.ErrSessionExpired) {
+			s.renewExpiredZhidao()
+		}
 		return err
 	}
 	if err := s.commitZhidaoSync(ctx, generation, func() error {
@@ -228,6 +231,9 @@ func (s *Server) syncZhidao(ctx context.Context) error {
 	tasks, err := adapter.Tasks(ctx)
 	if err != nil {
 		_ = s.failZhidaoSync(ctx, generation, errors.Is(err, platform.ErrSessionExpired), "任务采集失败")
+		if errors.Is(err, platform.ErrSessionExpired) {
+			s.renewExpiredZhidao()
+		}
 		return err
 	}
 	updated, err := sessionCredentials(adapter, cookie)

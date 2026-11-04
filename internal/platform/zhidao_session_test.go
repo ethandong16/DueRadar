@@ -2,7 +2,9 @@ package platform
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/url"
@@ -122,5 +124,22 @@ func TestZhidaoCredentialsPreserveRenewedSession(t *testing.T) {
 	restored := NewZhidao(serialized)
 	if restored.session.Token != session.Token {
 		t.Fatal("renewed token was lost after restart")
+	}
+}
+
+func TestZhidaoSessionExpiry(t *testing.T) {
+	want := time.Now().Add(24 * time.Hour).Truncate(time.Second)
+	claims := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, want.Unix())))
+	token := "eyJhbGciOiJub25lIn0." + claims + ".signature"
+	data, _ := json.Marshal(ZhidaoSession{Token: "ai-poly", Cookies: []zhidaoCookie{{URL: "https://cloudapi.polymas.com", Cookie: &http.Cookie{Name: "jt-cas", Value: token, Domain: ".polymas.com", Path: "/"}}}})
+	got, ok := ZhidaoSessionExpiry(string(data))
+	if !ok || !got.Equal(want) {
+		t.Fatalf("expiry = %v, %v; want %v", got, ok, want)
+	}
+	if _, ok := ZhidaoSessionExpiry(`{"token":"opaque"}`); ok {
+		t.Fatal("opaque token must not report an expiry")
+	}
+	if _, ok := ZhidaoSessionExpiry("not json"); ok {
+		t.Fatal("invalid session must not report an expiry")
 	}
 }
