@@ -124,6 +124,12 @@ func cloneState(s State) State {
 			copy.InClassSeen[key] = seen
 		}
 	}
+	if s.ClassroomActions != nil {
+		copy.ClassroomActions = make(map[string]time.Time, len(s.ClassroomActions))
+		for key, at := range s.ClassroomActions {
+			copy.ClassroomActions[key] = at
+		}
+	}
 	return copy
 }
 

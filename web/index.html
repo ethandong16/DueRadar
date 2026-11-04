@@ -382,9 +382,44 @@
                   </div>
                 </div>
 
+                <div class="field-group">
+                  <p class="field-group__title">雨课堂随堂选择题助手 · 默认关闭</p>
+                  <label class="switch-label" for="rain-fallback-enabled">
+                    <span><strong>最后 10 秒随机兜底</strong><small>只在尚未作答时随机选一个，不调用模型。</small></span>
+                    <input id="rain-fallback-enabled" type="checkbox" role="switch" aria-describedby="rain-assistant-hint">
+                  </label>
+                  <label class="switch-label" for="rain-analysis-enabled">
+                    <span><strong>新题 AI 分析并推送 Bark</strong><small>题目出现即分析；只推送参考答案，不自动提交模型答案。</small></span>
+                    <input id="rain-analysis-enabled" type="checkbox" role="switch" aria-describedby="rain-assistant-hint">
+                  </label>
+                  <p class="field-hint" id="rain-assistant-hint">两个开关独立于课上提醒。仅支持已确认学生身份的随堂单选／多选题（多选兜底也只选一个字母）；不处理作业、试卷、考试、投票或签到。倒计时或作答状态未知时跳过；随机答案不保证正确，提交结果未知时不重试。实时学生接口兼容性仍待实际课堂验收。</p>
+                </div>
+
                 <div class="form-actions form-actions--end">
                   <button class="button primary" type="submit">保存提醒规则</button>
                   <button id="settings-defaults" class="button secondary" type="button">填入默认值</button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel settings-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-index">03 / 可选分析</p>
+                  <h2>课堂 AI 配置</h2>
+                  <p>使用你自己的 Anthropic API Key，按 DueRadar 账号独立加密保存。</p>
+                </div>
+                <span id="analysis-status" class="badge neutral">未配置</span>
+              </div>
+              <form id="analysis-form">
+                <label for="analysis-model">Claude 模型</label>
+                <input id="analysis-model" type="text" required placeholder="claude-opus-5-5" autocomplete="off" maxlength="100">
+                <label for="analysis-key">Anthropic API Key</label>
+                <input id="analysis-key" type="password" autocomplete="new-password" placeholder="输入 API Key" maxlength="4096">
+                <p class="field-hint">留空保留已存密钥。保存配置不会调用模型；需要另行开启上方 AI 分析并配置 Bark。开启后会向 Anthropic 发送题干、选项及支持来源的课件图片，产生 API 费用；每题最多一次，不保证正确。</p>
+                <div class="form-actions">
+                  <button class="button primary" type="submit">保存 AI 配置</button>
+                  <button id="analysis-clear" class="button secondary" type="button">移除已存密钥</button>
                 </div>
               </form>
             </section>

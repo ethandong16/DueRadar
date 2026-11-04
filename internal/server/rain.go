@@ -38,6 +38,7 @@ func (s *Server) startRainLogin(w http.ResponseWriter, r *http.Request) {
 		s.rainSyncCancel()
 		s.rainSyncCancel = nil
 	}
+	s.invalidateClassroomsLocked()
 	s.rainGeneration++
 	generation := s.rainGeneration
 	loginCtx, loginCancel := context.WithTimeout(s.lifetime, 200*time.Second)
@@ -174,6 +175,7 @@ func (s *Server) cancelRainLogin(w http.ResponseWriter, r *http.Request) {
 	// A late QR dialog dismissal must not cancel a newer assisted flow.
 	canceled := s.rainAssistActive == nil && (s.rainState == "initializing" || s.rainState == "waiting")
 	if canceled {
+		s.invalidateClassroomsLocked()
 		s.rainGeneration++
 		if s.rainCancel != nil {
 			s.rainCancel()

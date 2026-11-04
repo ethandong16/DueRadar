@@ -118,6 +118,9 @@ func (e *Engine) UpdateSettingsAt(settings Settings, now time.Time) error {
 		s.Settings = settings
 		for i := range s.Events {
 			ev := &s.Events[i]
+			if actionable(*ev) && ev.Kind == "rain_analysis" && !settings.RainAnalysisEnabled {
+				cancel(ev, "classroom analysis disabled")
+			}
 			if actionable(*ev) && scheduled(ev.Kind) && !offsetConfigured(settings, *ev) {
 				cancel(ev, "reminder setting removed")
 			}
@@ -177,6 +180,12 @@ func pruneInClassSeen(s *State, now time.Time) bool {
 	for key, seen := range s.InClassSeen {
 		if now.Sub(seen) > inClassSeenRetention {
 			delete(s.InClassSeen, key)
+			removed = true
+		}
+	}
+	for key, at := range s.ClassroomActions {
+		if now.Sub(at) > inClassSeenRetention {
+			delete(s.ClassroomActions, key)
 			removed = true
 		}
 	}
@@ -242,6 +251,11 @@ func (e *Engine) ResetPlatformForRebind(platform string) error {
 		for key := range s.InClassSeen {
 			if strings.HasPrefix(key, prefix) {
 				delete(s.InClassSeen, key)
+			}
+		}
+		for key := range s.ClassroomActions {
+			if strings.HasPrefix(key, prefix) {
+				delete(s.ClassroomActions, key)
 			}
 		}
 		i := accountIndex(s, platform)
@@ -541,6 +555,9 @@ func eventValid(s *State, ev Event, now time.Time) bool {
 	if ev.Kind == "in_class" {
 		return !now.After(ev.DueAt.Add(InClassWindow))
 	}
+	if ev.Kind == "rain_analysis" {
+		return s.Settings.RainAnalysisEnabled && ev.AnchorAt != nil && now.Before(*ev.AnchorAt) && now.Before(ev.DueAt.Add(2*time.Minute))
+	}
 	for _, t := range s.Tasks {
 		if t.Platform != ev.Platform || t.ID != ev.TaskID {
 			continue
@@ -653,7 +670,7 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 			fresh := false
 			for _, a := range s.Accounts {
 				if a.Platform == ev.Platform {
-					if ev.Kind == "in_class" {
+					if ev.Kind == "in_class" || ev.Kind == "rain_analysis" {
 						// The fast in-class loop produced this event moments ago,
 						// so a full 15-minute task sync is not required. A login
 						// that needs revalidation still blocks delivery.

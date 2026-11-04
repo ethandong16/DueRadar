@@ -14,10 +14,12 @@ import (
 )
 
 type Config struct {
-	BarkURL       string `json:"bark_url"`
-	BarkKey       string `json:"bark_key"`
-	RainCookie    string `json:"rain_cookie,omitempty"`
-	ZhidaoSession string `json:"zhidao_session,omitempty"`
+	BarkURL        string `json:"bark_url"`
+	BarkKey        string `json:"bark_key"`
+	RainCookie     string `json:"rain_cookie,omitempty"`
+	ZhidaoSession  string `json:"zhidao_session,omitempty"`
+	AnalysisAPIKey string `json:"analysis_api_key,omitempty"`
+	AnalysisModel  string `json:"analysis_model,omitempty"`
 }
 
 type Vault struct {

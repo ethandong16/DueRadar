@@ -218,7 +218,7 @@ func claimEligible(s *State, ev Event, now time.Time) bool {
 	}
 	for _, a := range s.Accounts {
 		if a.Platform == ev.Platform {
-			if ev.Kind == "in_class" {
+			if ev.Kind == "in_class" || ev.Kind == "rain_analysis" {
 				return !a.NeedsRevalidation
 			}
 			return !a.NeedsRevalidation && a.SyncState == "success" && a.LastSuccessAt != nil && now.Sub(*a.LastSuccessAt) <= FreshnessLimit

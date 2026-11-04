@@ -155,6 +155,7 @@ func (s *Server) startRainAssist(w http.ResponseWriter, r *http.Request) {
 		s.rainSyncCancel()
 		s.rainSyncCancel = nil
 	}
+	s.invalidateClassroomsLocked()
 	s.rainGeneration++
 	expires := now.Add(rainAssistLifetime)
 	ctx, cancel := context.WithDeadline(s.lifetime, expires)
@@ -214,6 +215,7 @@ func (s *Server) finishRainAssistLocked(flow *rainAssist, state, message string)
 		return
 	}
 	s.rainAssistActive, s.rainCancel = nil, nil
+	s.invalidateClassroomsLocked()
 	s.rainGeneration++
 	s.rainState, s.rainError = state, message
 	previous := s.rainPreviousLogin
