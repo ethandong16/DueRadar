@@ -45,7 +45,7 @@ function browser(intercept = null) {
     return elements.get(id);
   }
   for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all";
-  $("settings-form").inputs = ["deadline-minutes", "exam-minutes", "video-minutes", "quiet-enabled", "quiet-start", "quiet-end", "timezone", "in-class-enabled", "in-class-poll", "rain-fallback-enabled", "rain-analysis-enabled"].map($);
+  $("settings-form").inputs = ["deadline-minutes", "exam-minutes", "video-minutes", "quiet-enabled", "quiet-start", "quiet-end", "timezone", "in-class-enabled", "in-class-poll", "zhidao-in-class-enabled", "rain-fallback-enabled", "rain-analysis-enabled"].map($);
   $("analysis-form").inputs = ["analysis-key", "analysis-model"].map($);
   let interval;
   let loggedIn = true;
@@ -57,7 +57,7 @@ function browser(intercept = null) {
   const window = { listeners: {}, addEventListener(name, fn) { this.listeners[name] = fn; } };
   const page = {
     $, calls, document, location, window, intercept, deferClose: false, closeEvents: [],
-    settings: { deadline_minutes: [1440, 180, 30], exam_start_minutes: [1440, 60], video_minutes: [4320, 1440, 180], quiet_enabled: true, quiet_start: "23:00", quiet_end: "08:00", timezone: "Asia/Shanghai" },
+    settings: { deadline_minutes: [1440, 180, 30], exam_start_minutes: [1440, 60], video_minutes: [4320, 1440, 180], quiet_enabled: true, quiet_start: "23:00", quiet_end: "08:00", timezone: "Asia/Shanghai", zhidao_in_class_enabled: true },
     click: (id) => $(id).emit("click"),
     submit: (id) => $(id).emit("submit", { submitter: $(id).querySelector("button") }),
     tick: () => interval(),
@@ -428,6 +428,7 @@ test("classroom assistants default off and save independent opt-ins", async () =
   await settle();
   assert.equal(page.$("rain-fallback-enabled").checked, false);
   assert.equal(page.$("rain-analysis-enabled").checked, false);
+  assert.equal(page.$("zhidao-in-class-enabled").checked, true);
   page.$("rain-fallback-enabled").checked = true;
   page.$("settings-form").emit("input");
   await page.submit("settings-form");
@@ -438,6 +439,7 @@ test("classroom assistants default off and save independent opt-ins", async () =
   await page.click("settings-defaults");
   assert.equal(page.$("rain-fallback-enabled").checked, false);
   assert.equal(page.$("rain-analysis-enabled").checked, false);
+  assert.equal(page.$("zhidao-in-class-enabled").checked, true);
 });
 
 test("background refresh preserves an unsaved model and key", async () => {

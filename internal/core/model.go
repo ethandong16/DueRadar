@@ -39,6 +39,10 @@ type Settings struct {
 	// answerable activity is pushed. PollSeconds is the fast-loop interval.
 	InClassEnabled     bool `json:"in_class_enabled"`
 	InClassPollSeconds int  `json:"in_class_poll_seconds"`
+	// ZhidaoInClassEnabled watches live Zhidao lessons for new votes. It is
+	// read-only, experimental, independent of Rain Classroom monitoring, and on
+	// by default; the user can switch it off and that explicit choice persists.
+	ZhidaoInClassEnabled bool `json:"zhidao_in_class_enabled"`
 	// Both classroom assistants are opt-in and independent of reminder delivery.
 	RainFallbackEnabled bool `json:"rain_fallback_enabled"`
 	RainAnalysisEnabled bool `json:"rain_analysis_enabled"`
@@ -53,7 +57,7 @@ type Settings struct {
 const DefaultInClassPollSeconds = 20
 
 func DefaultSettings() Settings {
-	return Settings{Timezone: "Asia/Shanghai", QuietEnabled: true, QuietStart: "23:00", QuietEnd: "08:00", DeadlineMinutes: []int{1440, 180, 30}, ExamStartMinutes: []int{1440, 60}, VideoMinutes: []int{4320, 1440, 180}, InClassEnabled: true, InClassPollSeconds: DefaultInClassPollSeconds}
+	return Settings{Timezone: "Asia/Shanghai", QuietEnabled: true, QuietStart: "23:00", QuietEnd: "08:00", DeadlineMinutes: []int{1440, 180, 30}, ExamStartMinutes: []int{1440, 60}, VideoMinutes: []int{4320, 1440, 180}, InClassEnabled: true, InClassPollSeconds: DefaultInClassPollSeconds, ZhidaoInClassEnabled: true}
 }
 
 type Account struct {

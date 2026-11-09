@@ -345,7 +345,15 @@ func (s *Server) observeClassroomProblem(w *classroomWatch, p platform.Classroom
 	item := core.InClassQuiz{}
 	if notify {
 		title := strings.TrimSpace(p.Title)
-		if title == "" {
+		category := ""
+		body := inClassProblemBody(w.lesson, p, settings.Timezone)
+		if p.IsPoll() {
+			category = "poll"
+			if title == "" {
+				title = "课堂投票"
+			}
+			body = inClassPollBody(w.lesson, p, settings.Timezone)
+		} else if title == "" {
 			title = "课堂习题"
 		}
 		item = core.InClassQuiz{
@@ -353,8 +361,9 @@ func (s *Server) observeClassroomProblem(w *classroomWatch, p platform.Classroom
 			ActivityID:  "classroom:" + p.ID,
 			Course:      w.lesson.CourseName,
 			Title:       title,
-			Body:        inClassProblemBody(w.lesson, p, settings.Timezone),
+			Body:        body,
 			Notify:      true,
+			Category:    category,
 		}
 	}
 	s.rainMu.Unlock()
@@ -373,12 +382,15 @@ func (s *Server) observeClassroomProblem(w *classroomWatch, p platform.Classroom
 	}
 }
 
-func inClassProblemBody(lesson platform.LiveLesson, p platform.ClassroomProblem, timezone string) string {
-	parts := []string{lesson.CourseName}
+func inClassCourseLine(lesson platform.LiveLesson) string {
 	if lesson.ClassroomName != "" && lesson.ClassroomName != lesson.CourseName {
-		parts[0] = lesson.CourseName + " · " + lesson.ClassroomName
+		return lesson.CourseName + " · " + lesson.ClassroomName
 	}
-	parts = append(parts, "课堂发布了新的随堂习题")
+	return lesson.CourseName
+}
+
+func inClassProblemBody(lesson platform.LiveLesson, p platform.ClassroomProblem, timezone string) string {
+	parts := []string{inClassCourseLine(lesson), "课堂发布了新的随堂习题"}
 	if !p.Deadline.IsZero() {
 		location, err := time.LoadLocation(timezone)
 		if err != nil {
@@ -388,6 +400,42 @@ func inClassProblemBody(lesson platform.LiveLesson, p platform.ClassroomProblem,
 	}
 	parts = append(parts, "打开雨课堂立即作答")
 	return strings.Join(parts, "\n")
+}
+
+// inClassPollBody announces a poll without ever participating in it. The
+// question text is included when the platform supplies plain text, so the
+// student can decide whether to open Rain Classroom.
+func inClassPollBody(lesson platform.LiveLesson, p platform.ClassroomProblem, timezone string) string {
+	parts := []string{inClassCourseLine(lesson)}
+	if p.AnonymousPoll() {
+		parts = append(parts, "课堂发布了新的匿名投票")
+	} else {
+		parts = append(parts, "课堂发布了新的投票")
+	}
+	if prompt := inClassPollPrompt(p.Body); prompt != "" {
+		parts = append(parts, prompt)
+	}
+	if !p.Deadline.IsZero() {
+		location, err := time.LoadLocation(timezone)
+		if err != nil {
+			location = time.UTC
+		}
+		parts = append(parts, "截止 "+p.Deadline.In(location).Format("15:04:05"))
+	}
+	parts = append(parts, "打开雨课堂参与投票")
+	return strings.Join(parts, "\n")
+}
+
+func inClassPollPrompt(body string) string {
+	text := strings.Join(strings.Fields(body), " ")
+	if text == "" || strings.ContainsAny(text, "<>") {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) > 160 {
+		text = string(runes[:160]) + "…"
+	}
+	return text
 }
 
 func (s *Server) runFallback(w *classroomWatch, id string) {

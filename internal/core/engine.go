@@ -102,6 +102,18 @@ func (e *Engine) UpdateSettings(settings Settings) error {
 	return e.UpdateSettingsAt(settings, time.Now())
 }
 
+// Settings returns a copy of the current reminder settings without cloning the
+// task and event history. Polling loops use it on every tick.
+func (e *Engine) Settings() Settings {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	settings := e.state.Settings
+	settings.DeadlineMinutes = append([]int(nil), settings.DeadlineMinutes...)
+	settings.ExamStartMinutes = append([]int(nil), settings.ExamStartMinutes...)
+	settings.VideoMinutes = append([]int(nil), settings.VideoMinutes...)
+	return settings
+}
+
 // UpdateSettingsAt permits a deterministic administrative update in tests and
 // import tools. New schedules start from now and do not backfill past offsets.
 func (e *Engine) UpdateSettingsAt(settings Settings, now time.Time) error {

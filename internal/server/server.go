@@ -33,24 +33,27 @@ type attempt struct {
 	since time.Time
 }
 type Server struct {
-	zhidaoMu            sync.Mutex
-	zhidaoState         string
-	zhidaoPreviousLogin string
-	zhidaoError         string
-	zhidaoGeneration    uint64
-	zhidaoCancel        context.CancelFunc
-	zhidaoSyncCancel    context.CancelFunc
-	startZhidao         func(context.Context) (*rainFlow, error)
-	newZhidao           func(string) rainAdapter
-	zhidaoAutoMu        sync.Mutex
-	zhidaoAutoState     string
-	zhidaoAutoStage     string
-	zhidaoAutoError     string
-	zhidaoAutoAt        *time.Time
-	zhidaoAutoAttempt   time.Time
-	smsSource           smsSource
-	passwordLogin       func(context.Context, string, string, platform.SMSCollector) (string, error)
-	slideLogin          func(context.Context, string, string, string, platform.SMSCollector) (string, error)
+	zhidaoMu                sync.Mutex
+	zhidaoState             string
+	zhidaoPreviousLogin     string
+	zhidaoError             string
+	zhidaoGeneration        uint64
+	zhidaoCancel            context.CancelFunc
+	zhidaoSyncCancel        context.CancelFunc
+	startZhidao             func(context.Context) (*rainFlow, error)
+	newZhidao               func(string) rainAdapter
+	zhidaoAutoMu            sync.Mutex
+	zhidaoAutoState         string
+	zhidaoAutoStage         string
+	zhidaoAutoError         string
+	zhidaoAutoAt            *time.Time
+	zhidaoAutoAttempt       time.Time
+	zhidaoInClassMu         sync.Mutex
+	zhidaoInClassStatus     zhidaoInClassState
+	zhidaoClassroomBaseline map[string]bool
+	smsSource               smsSource
+	passwordLogin           func(context.Context, string, string, platform.SMSCollector) (string, error)
+	slideLogin              func(context.Context, string, string, string, platform.SMSCollector) (string, error)
 
 	Engine            *core.Engine
 	Vault             *vault.Vault
@@ -484,6 +487,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		deliveryError = "有通知发送失败，请查看发送记录并检查 Bark 配置及网络"
 	}
 	inClass := s.inClassSnapshot()
+	zhidaoPoll := s.zhidaoInClassSnapshot()
 	settings := s.Engine.Snapshot().Settings
 	s.rainMu.Lock()
 	classroom := s.classroomStatus
@@ -502,9 +506,17 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if !inClass.LastQuizAt.IsZero() {
 		lastQuiz = inClass.LastQuizAt
 	}
+	var zhidaoLastCheck, zhidaoLastPoll any
+	if !zhidaoPoll.LastCheckAt.IsZero() {
+		zhidaoLastCheck = zhidaoPoll.LastCheckAt
+	}
+	if !zhidaoPoll.LastPollAt.IsZero() {
+		zhidaoLastPoll = zhidaoPoll.LastPollAt
+	}
 	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 2, "go_version": runtime.Version(), "message": "普通雨课堂和知到校内课支持扫码绑定；共享课待实测", "notification_error": deliveryError, "notification_last_attempt_at": deliveryAt, "notification_failure_count": health.UnresolvedFailures, "notification_last_success_at": health.LastSuccessAt,
 		"classroom": classroom, "rain_fallback_enabled": settings.RainFallbackEnabled, "rain_analysis_enabled": settings.RainAnalysisEnabled,
-		"in_class_enabled": settings.InClassEnabled, "in_class_poll_seconds": settings.InClassPollSeconds, "in_class_last_check_at": lastCheck, "in_class_lessons": inClass.Lessons, "in_class_last_quiz_at": lastQuiz, "in_class_last_quiz": inClass.LastQuiz, "in_class_detected": inClass.Detected, "in_class_error": inClass.Error})
+		"in_class_enabled": settings.InClassEnabled, "in_class_poll_seconds": settings.InClassPollSeconds, "in_class_last_check_at": lastCheck, "in_class_lessons": inClass.Lessons, "in_class_last_quiz_at": lastQuiz, "in_class_last_quiz": inClass.LastQuiz, "in_class_detected": inClass.Detected, "in_class_error": inClass.Error,
+		"zhidao_in_class_enabled": settings.ZhidaoInClassEnabled, "zhidao_in_class_last_check_at": zhidaoLastCheck, "zhidao_in_class_lessons": zhidaoPoll.Lessons, "zhidao_in_class_last_poll_at": zhidaoLastPoll, "zhidao_in_class_last_poll": zhidaoPoll.LastPoll, "zhidao_in_class_detected": zhidaoPoll.Detected, "zhidao_in_class_error": zhidaoPoll.Error})
 }
 
 // Sync and Deliver have separate clocks; slow polling does not postpone known deadlines.
@@ -724,6 +736,7 @@ func (s *Server) Run(ctx context.Context) {
 		}
 	})
 	s.startJob(s.runInClass)
+	s.startJob(s.runZhidaoInClass)
 	s.startJob(s.runClassrooms)
 	s.startJob(func(ctx context.Context) {
 		// Give the startup sync a moment to validate or rotate the stored

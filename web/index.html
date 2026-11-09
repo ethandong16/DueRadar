@@ -276,7 +276,7 @@
                 </div>
                 <h2 id="quiet-title">正在读取静默设置</h2>
                 <p id="quiet-summary">正在读取静默设置</p>
-                <p class="quiet-rule">考前 1 小时、截止前 30 分钟与课上答题照常发送。</p>
+                <p class="quiet-rule">考前 1 小时、截止前 30 分钟与课上答题/投票照常发送。</p>
                 <button type="button" class="text-button text-button--light" data-view="settings">调整通知规则 <span aria-hidden="true">→</span></button>
               </section>
             </aside>
@@ -398,9 +398,9 @@
                 </div>
 
                 <div class="field-group">
-                  <p class="field-group__title">课上答题</p>
+                  <p class="field-group__title">课上答题与投票</p>
                   <label class="switch-label" for="in-class-enabled">
-                    <span><strong>课上答题提醒</strong><small>出现新的随堂答题时立即提醒。</small></span>
+                    <span><strong>课上答题与投票提醒</strong><small>出现新的随堂答题或投票时立即提醒；只提醒，不自动投票。</small></span>
                     <input id="in-class-enabled" type="checkbox" role="switch">
                   </label>
                   <label for="in-class-poll">检查间隔（秒）</label>
@@ -408,7 +408,17 @@
                   <p class="field-hint" id="in-class-hint">10—300 秒，仅在上课期间检查。</p>
                   <div class="form-actions">
                     <button id="in-class-test" class="button secondary" type="button">发送课上答题测试</button>
+                    <button id="in-class-test-poll" class="button secondary" type="button">发送投票提醒测试</button>
                   </div>
+                </div>
+
+                <div class="field-group">
+                  <p class="field-group__title">知到课堂投票检测 · 实验</p>
+                  <label class="switch-label" for="zhidao-in-class-enabled">
+                    <span><strong>知到课上投票提醒</strong><small>读取知到学生课堂的投票列表，出现新投票时立即提醒；只提醒，不自动投票。</small></span>
+                    <input id="zhidao-in-class-enabled" type="checkbox" role="switch" aria-describedby="zhidao-in-class-hint">
+                  </label>
+                  <p class="field-hint" id="zhidao-in-class-hint">共用上面的检查间隔。使用知到官方学生端只读接口，需要会话包含课堂端凭据；尚未完成真实课堂验收，可能受学校或课程权限限制。</p>
                 </div>
 
                 <div class="field-group">

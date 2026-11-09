@@ -316,6 +316,50 @@ func TestClassroomTimelineProblemNotifiesWithoutSlideOptions(t *testing.T) {
 	}
 }
 
+func TestClassroomPollNotifiesWithoutAnswerPath(t *testing.T) {
+	s, _ := testApp(t)
+	w := prepareClassroom(t, s, false, false, &fakeClassroom{})
+	settings := s.Engine.Snapshot().Settings
+	settings.InClassEnabled = true
+	if err := s.Engine.UpdateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	var pushes atomic.Int32
+	var mu sync.Mutex
+	var gotTitle, gotBody string
+	s.sendBark = func(_ context.Context, _, _, title, body string) error {
+		mu.Lock()
+		gotTitle, gotBody = title, body
+		mu.Unlock()
+		pushes.Add(1)
+		return nil
+	}
+	now := time.Now()
+	p := platform.ClassroomProblem{
+		LessonID: "10", ID: "60", PresentationID: "20",
+		Title: "你支持哪种解法？", Body: "你更认同哪种解释？", Type: "Polling",
+		Options: []string{"赞成", "反对"}, StartedAt: now, Deadline: now.Add(time.Minute),
+	}
+	s.observeClassroomProblem(w, p)
+	eventually(t, func() bool { return pushes.Load() == 1 })
+	mu.Lock()
+	title, body := gotTitle, gotBody
+	mu.Unlock()
+	if !strings.Contains(title, "课上投票") || !strings.Contains(title, "你支持哪种解法？") {
+		t.Fatalf("title=%q", title)
+	}
+	if !strings.Contains(body, "课堂发布了新的投票") || !strings.Contains(body, "你更认同哪种解释？") || strings.Contains(body, "作答") {
+		t.Fatalf("poll body implies an answer: %q", body)
+	}
+	if actions := s.Engine.Snapshot().ClassroomActions; len(actions) != 0 {
+		t.Fatalf("poll created a classroom action: %+v", actions)
+	}
+	s.observeClassroomProblem(w, p)
+	if pushes.Load() != 1 {
+		t.Fatal("duplicate poll notification")
+	}
+}
+
 func TestClassroomStaleAnalysisCannotNotify(t *testing.T) {
 	for _, mode := range []string{"disable", "model change", "rebind", "closed"} {
 		t.Run(mode, func(t *testing.T) {

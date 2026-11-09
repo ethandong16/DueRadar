@@ -53,6 +53,19 @@ func Open(path string) (*Engine, error) {
 	if e.state.Version != 1 {
 		return nil, errors.New("unsupported state version")
 	}
+	// Zhidao poll monitoring is on by default, but a stored false is an explicit
+	// opt-out. Only states written before the setting existed lack the key, so
+	// probe the raw settings object to tell "never stored" from "stored false".
+	missingZhidaoSetting := false
+	if _, seekErr := f.Seek(0, io.SeekStart); seekErr == nil {
+		var probe struct {
+			Settings map[string]json.RawMessage `json:"settings"`
+		}
+		if json.NewDecoder(io.LimitReader(f, 64<<20)).Decode(&probe) == nil {
+			_, stored := probe.Settings["zhidao_in_class_enabled"]
+			missingZhidaoSetting = !stored
+		}
+	}
 	// Windows denies replacing a file while this read handle remains open, so
 	// close it before the one-time migration write below. The deferred Close
 	// still covers every earlier error return and is harmless after this point.
@@ -62,6 +75,10 @@ func Open(path string) (*Engine, error) {
 	// Settings gained fields after the first state format. A missing poll
 	// interval or timezone marks an older file, which is migrated once.
 	migrate := false
+	if missingZhidaoSetting {
+		e.state.Settings.ZhidaoInClassEnabled = true
+		migrate = true
+	}
 	if e.state.Settings.InClassPollSeconds == 0 {
 		e.state.Settings.InClassEnabled = true
 		e.state.Settings.InClassPollSeconds = DefaultInClassPollSeconds

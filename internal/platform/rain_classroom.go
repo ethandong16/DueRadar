@@ -24,13 +24,31 @@ type ClassroomProblem struct {
 	LessonID, ID, PresentationID  string
 	Title, Body, ImageURL         string
 	Type                          string
+	ProblemType                   int
 	Options                       []string
 	StartedAt, Deadline           time.Time
 	TimingAt                      time.Time
 	AnswerKnown, Answered, Closed bool
 }
 
+// IsPoll reports whether the platform marked this activity as a poll. The
+// student live client uses the strings Polling and AnonymousPolling; the v3
+// lesson payloads carry the same type as the number 3. Polls are detected and
+// announced, but never answered automatically by DueRadar.
+func (p ClassroomProblem) IsPoll() bool {
+	return p.ProblemType == 3 || p.Type == "Polling" || p.Type == "AnonymousPolling"
+}
+
+func (p ClassroomProblem) AnonymousPoll() bool {
+	return p.Type == "AnonymousPolling"
+}
+
 func (p ClassroomProblem) Choice() bool {
+	if p.IsPoll() {
+		// A poll may reuse a choice-like option list. It is still not a graded
+		// question and must never reach the fallback submit or model path.
+		return false
+	}
 	if (p.Type != "MultipleChoice" && p.Type != "MultipleChoiceMA") || len(p.Options) < 2 || len(p.Options) > 26 {
 		return false
 	}
@@ -67,6 +85,11 @@ type LiveClassroom struct {
 	timing   map[string]*rainTimingRequest
 	revision map[string]uint64
 	timingID int64
+	// v3Problems caches the read-only presentation metadata used to label a live
+	// problem when the legacy bootstrap is unavailable. It is enrichment only:
+	// it never enables an answer or submission path.
+	v3Problems map[string]map[string]rainV3Problem
+	v3Tried    map[string]time.Time
 }
 
 type rainTimingRequest struct {
@@ -83,11 +106,12 @@ type rainClassroomSlide struct {
 	Cover   string          `json:"Cover"`
 	Result  json.RawMessage `json:"Result"`
 	Problem *struct {
-		ID      json.Number     `json:"ProblemID"`
-		Type    string          `json:"Type"`
-		Body    string          `json:"Body"`
-		Result  json.RawMessage `json:"Result"`
-		Bullets []struct {
+		ID          json.Number     `json:"ProblemID"`
+		Type        string          `json:"Type"`
+		ProblemType int             `json:"problemType"`
+		Body        string          `json:"Body"`
+		Result      json.RawMessage `json:"Result"`
+		Bullets     []struct {
 			Label string `json:"Label"`
 		} `json:"Bullets"`
 	} `json:"Problem"`
@@ -133,7 +157,6 @@ func (id *rainID) UnmarshalJSON(data []byte) error {
 func (id rainID) String() string { return string(id) }
 
 func (id rainID) positive() bool { return rainPositiveID(json.Number(id)) }
-
 
 // classroomData reads the legacy presentation bootstrap. It supplies slide
 // text and options for older lessons, but newer live lessons reject it. The
@@ -216,7 +239,7 @@ func (r *Rain) OpenClassroom(ctx context.Context, lesson LiveLesson) (*LiveClass
 		return nil, errors.New("课堂实时连接失败")
 	}
 	conn.SetReadLimit(4 << 20)
-	c := &LiveClassroom{rain: r, lesson: lesson, conn: conn, data: data, problems: make(map[string]ClassroomProblem), changed: make(chan struct{}), timing: make(map[string]*rainTimingRequest), revision: make(map[string]uint64)}
+	c := &LiveClassroom{rain: r, lesson: lesson, conn: conn, data: data, problems: make(map[string]ClassroomProblem), changed: make(chan struct{}), timing: make(map[string]*rainTimingRequest), revision: make(map[string]uint64), v3Problems: make(map[string]map[string]rainV3Problem), v3Tried: make(map[string]time.Time)}
 	// The live timeline keys the hello by string. Sending a JSON number loses
 	// precision for 19-digit lesson ids and the server answers lessonfinished.
 	hello := map[string]any{"op": "hello", "role": "student", "lessonid": lesson.LessonID, "ver": 1}
@@ -374,14 +397,15 @@ func (c *LiveClassroom) Run(ctx context.Context, onProblem func(ClassroomProblem
 }
 
 type rainTimelineProblem struct {
-	Type  string  `json:"type"`
-	Prob  rainID  `json:"prob"`
-	Pres  rainID  `json:"pres"`
-	SID   rainID  `json:"sid"`
-	Index int     `json:"si"`
-	DT    int64   `json:"dt"`
-	Now   int64   `json:"now"`
-	Limit *int64  `json:"limit"`
+	Type        string `json:"type"`
+	Prob        rainID `json:"prob"`
+	Pres        rainID `json:"pres"`
+	SID         rainID `json:"sid"`
+	Index       int    `json:"si"`
+	DT          int64  `json:"dt"`
+	Now         int64  `json:"now"`
+	Limit       *int64 `json:"limit"`
+	ProblemType *int   `json:"problemType"`
 }
 
 func (c *LiveClassroom) signalLocked() { close(c.changed); c.changed = make(chan struct{}) }
@@ -409,6 +433,16 @@ func (c *LiveClassroom) loadProblem(ctx context.Context, event rainTimelineProbl
 			if err == nil {
 				c.data = data
 				p, ok = classroomProblem(data, c.lesson.LessonID, event)
+			}
+		}
+		if !ok && len(c.data.Presentations) == 0 {
+			// Newer v3 lessons reject the legacy bootstrap. The read-only lesson
+			// summary presentation still identifies the problem type for some
+			// lessons; use it only to label the announcement, never to answer.
+			if meta, found := c.v3Problem(ctx, event); found {
+				p = detectedProblem(c.lesson.LessonID, event)
+				p.Title, p.Body, p.Type, p.ProblemType = meta.Title, meta.Body, meta.Type, meta.ProblemType
+				ok = p.ID != ""
 			}
 		}
 		if !ok {
@@ -444,6 +478,9 @@ func (c *LiveClassroom) loadProblem(ctx context.Context, event rainTimelineProbl
 // slide payload is unavailable. It is never answerable through this struct.
 func detectedProblem(lessonID string, event rainTimelineProblem) ClassroomProblem {
 	p := ClassroomProblem{LessonID: lessonID, ID: event.Prob.String(), PresentationID: event.Pres.String()}
+	if event.ProblemType != nil && *event.ProblemType > 0 && *event.ProblemType <= 100 {
+		p.ProblemType = *event.ProblemType
+	}
 	if event.DT >= 946684800000 && event.DT <= 4102444800000 {
 		p.StartedAt = time.UnixMilli(event.DT)
 	}
@@ -470,7 +507,7 @@ func classroomProblem(data rainClassroomData, lessonID string, event rainTimelin
 			if problem == nil || problem.ID.String() != event.Prob.String() {
 				return ClassroomProblem{}, false
 			}
-			p := ClassroomProblem{LessonID: lessonID, ID: problem.ID.String(), PresentationID: pres.ID.String(), Title: pres.Title, Body: problem.Body, ImageURL: slide.Cover, Type: problem.Type}
+			p := ClassroomProblem{LessonID: lessonID, ID: problem.ID.String(), PresentationID: pres.ID.String(), Title: pres.Title, Body: problem.Body, ImageURL: slide.Cover, Type: problem.Type, ProblemType: problem.ProblemType}
 			if event.DT >= 946684800000 && event.DT <= 4102444800000 {
 				p.StartedAt = time.UnixMilli(event.DT)
 			}
@@ -484,11 +521,25 @@ func classroomProblem(data rainClassroomData, lessonID string, event rainTimelin
 			seen := map[string]bool{}
 			for _, option := range problem.Bullets {
 				label := strings.TrimSpace(option.Label)
+				if p.IsPoll() {
+					// Poll options are display data only. They are not answer
+					// labels, so arbitrary text is allowed and kept for the body.
+					if label != "" && !seen[label] {
+						seen[label] = true
+						p.Options = append(p.Options, label)
+					}
+					continue
+				}
 				if len(label) != 1 || label[0] < 'A' || label[0] > 'Z' || seen[label] {
 					return ClassroomProblem{}, false
 				}
 				seen[label] = true
 				p.Options = append(p.Options, label)
+			}
+			if p.IsPoll() {
+				// A poll is a first-class detected activity but never a choice
+				// question for the answer helpers.
+				return p, true
 			}
 			return p, p.Choice()
 		}
@@ -505,6 +556,162 @@ func classroomResult(raw json.RawMessage) (known, answered bool) {
 		return false, false
 	}
 	return true, strings.TrimSpace(answer) != ""
+}
+
+// rainV3Problem is the subset of the v3 lesson-summary presentation that labels
+// a live timeline problem. It is deliberately read-only metadata: it does not
+// carry an answer/submission capability.
+type rainV3Problem struct {
+	Title       string
+	Body        string
+	Type        string
+	ProblemType int
+	Anonymous   bool
+}
+
+// classroomProblemsV3 reads the student lesson-summary presentation. Newer live
+// lessons reject the legacy bootstrap, but the summary presentation still maps a
+// problem id to its type on deployments that expose it. Callers treat any error
+// as "metadata unavailable"; the timeline announcement is never suppressed.
+func (r *Rain) classroomProblemsV3(ctx context.Context, lessonID, presentationID string) (map[string]rainV3Problem, error) {
+	if !rainPositiveID(json.Number(lessonID)) || !rainPositiveID(json.Number(presentationID)) {
+		return nil, errors.New("课堂课件标识无效")
+	}
+	q := url.Values{"lesson_id": {lessonID}, "presentation_id": {presentationID}}
+	env, err := r.get(ctx, "/api/v3/lesson-summary/student/presentation?"+q.Encode())
+	if err != nil {
+		return nil, err
+	}
+	if env.Code == nil {
+		return nil, errors.New("课堂课件响应格式变化")
+	}
+	if *env.Code != 0 {
+		return nil, errors.New("课堂课件读取失败")
+	}
+	var data struct {
+		Title        string `json:"title"`
+		Presentation struct {
+			Title string `json:"title"`
+		} `json:"presentation"`
+		Slides *[]struct {
+			Problem *struct {
+				ProblemID   rainID `json:"problemId"`
+				ID          rainID `json:"id"`
+				Type        string `json:"type"`
+				ProblemType int    `json:"problemType"`
+				Anonymous   bool   `json:"anonymous"`
+				Body        string `json:"body"`
+				Content     struct {
+					ProblemID   rainID `json:"problemId"`
+					ID          rainID `json:"id"`
+					Type        string `json:"type"`
+					ProblemType int    `json:"problemType"`
+					Anonymous   bool   `json:"anonymous"`
+					Body        string `json:"body"`
+				} `json:"content"`
+			} `json:"problem"`
+		} `json:"slides"`
+	}
+	if json.Unmarshal(env.Data, &data) != nil || data.Slides == nil {
+		return nil, errors.New("课堂课件格式变化")
+	}
+	if len(*data.Slides) > 5000 {
+		return nil, errors.New("课堂课件数量超限")
+	}
+	title := strings.TrimSpace(data.Title)
+	if title == "" {
+		title = strings.TrimSpace(data.Presentation.Title)
+	}
+	problems := make(map[string]rainV3Problem, len(*data.Slides))
+	for _, slide := range *data.Slides {
+		problem := slide.Problem
+		if problem == nil {
+			continue
+		}
+		id := ""
+		for _, candidate := range []rainID{problem.ProblemID, problem.ID, problem.Content.ProblemID, problem.Content.ID} {
+			if candidate.positive() {
+				id = candidate.String()
+				break
+			}
+		}
+		if id == "" {
+			continue
+		}
+		kind := strings.TrimSpace(problem.Type)
+		if kind == "" {
+			kind = strings.TrimSpace(problem.Content.Type)
+		}
+		numeric := problem.ProblemType
+		if numeric == 0 {
+			numeric = problem.Content.ProblemType
+		}
+		// Only the poll name is inferred from the numeric type. Other numeric
+		// types stay empty so this unverified metadata cannot enable a choice
+		// answer, fallback submission, or model request.
+		anonymous := problem.Anonymous || problem.Content.Anonymous
+		if numeric == 3 && kind == "" {
+			kind = "Polling"
+		}
+		if kind == "Polling" && anonymous {
+			kind = "AnonymousPolling"
+		}
+		body := strings.TrimSpace(problem.Body)
+		if body == "" {
+			body = strings.TrimSpace(problem.Content.Body)
+		}
+		if _, exists := problems[id]; exists {
+			continue
+		}
+		problems[id] = rainV3Problem{Title: title, Body: body, Type: kind, ProblemType: numeric, Anonymous: anonymous}
+	}
+	return problems, nil
+}
+
+// v3Problem fetches the presentation metadata for one live problem at most once
+// per lesson and caches the result. A failed fetch is retried after five minutes
+// so a socket reader is never blocked on the same unavailable endpoint for every
+// new problem.
+func (c *LiveClassroom) v3Problem(ctx context.Context, event rainTimelineProblem) (rainV3Problem, bool) {
+	if c.rain == nil || !event.Pres.positive() || !event.Prob.positive() {
+		return rainV3Problem{}, false
+	}
+	presentationID, problemID := event.Pres.String(), event.Prob.String()
+	c.mu.Lock()
+	if problems, ok := c.v3Problems[presentationID]; ok {
+		meta, found := problems[problemID]
+		c.mu.Unlock()
+		return meta, found
+	}
+	if tried, ok := c.v3Tried[presentationID]; ok && time.Since(tried) < 5*time.Minute {
+		c.mu.Unlock()
+		return rainV3Problem{}, false
+	}
+	if len(c.v3Problems) >= 8 {
+		c.mu.Unlock()
+		return rainV3Problem{}, false
+	}
+	if c.v3Problems == nil {
+		c.v3Problems = make(map[string]map[string]rainV3Problem)
+	}
+	if c.v3Tried == nil {
+		c.v3Tried = make(map[string]time.Time)
+	}
+	c.v3Tried[presentationID] = time.Now()
+	c.mu.Unlock()
+	fetchCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	problems, err := c.rain.classroomProblemsV3(fetchCtx, c.lesson.LessonID, presentationID)
+	cancel()
+	if err != nil {
+		return rainV3Problem{}, false
+	}
+	c.mu.Lock()
+	if len(c.v3Problems) < 8 {
+		c.v3Problems[presentationID] = problems
+	}
+	meta, found := problems[problemID]
+	c.mu.Unlock()
+	return meta, found
 }
 
 func (c *LiveClassroom) askTiming(ctx context.Context, id string, fresh bool) (*rainTimingRequest, error) {

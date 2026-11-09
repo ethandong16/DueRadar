@@ -26,6 +26,9 @@ type InClassQuiz struct {
 	Title       string
 	Body        string
 	Notify      bool
+	// Category "poll" makes the notification title say 投票 instead of 答题.
+	// It is presentation only; automatic answering never consumes this field.
+	Category string
 }
 
 // urgentEvent marks notifications that must bypass quiet hours. A quiz pushed
@@ -35,6 +38,16 @@ func urgentEvent(ev Event) bool {
 		return true
 	}
 	return ev.Kind == "exam_start" && ev.MinutesBefore == 60 || (ev.Kind == "deadline" || ev.Kind == "video_deadline") && ev.MinutesBefore == 30
+}
+
+// SeenInClass reports whether an activity was already recorded for a platform
+// and classroom. It lets a poller skip expensive detail requests for historical
+// activities while still relying on the persisted deduplication key.
+func (e *Engine) SeenInClass(platform, classroomID, activityID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, seen := e.state.InClassSeen[platform+"\x00"+classroomID+"\x00"+activityID]
+	return seen
 }
 
 // ReportInClass records observed in-class activities and creates a notification
@@ -83,11 +96,15 @@ func (e *Engine) ReportInClass(platform string, items []InClassQuiz, now time.Ti
 				continue
 			}
 			before := len(s.Events)
+			category := "答题"
+			if item.Category == "poll" {
+				category = "投票"
+			}
 			addEvent(s, Event{
 				ID:        eventID(platform, "in_class", item.ClassroomID, item.ActivityID),
 				Platform:  platform,
 				Kind:      "in_class",
-				Title:     "课上答题 · " + item.Title,
+				Title:     "课上" + category + " · " + item.Title,
 				Body:      strings.TrimSpace(item.Body),
 				DueAt:     now,
 				CreatedAt: now,

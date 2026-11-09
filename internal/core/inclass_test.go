@@ -2,6 +2,7 @@ package core
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,6 +43,30 @@ func TestReportInClassNotifiesOnce(t *testing.T) {
 	}
 	if len(engine.Snapshot().Events) != 1 {
 		t.Fatal("duplicate notification")
+	}
+}
+
+func TestReportInClassLabelsPollWithoutChangingDelivery(t *testing.T) {
+	engine := testEngine(t)
+	now := time.Date(2026, 10, 22, 2, 0, 0, 0, time.UTC)
+	if err := engine.Sync(PlatformZhidaoCampus, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	item := quizItem("13")
+	item.Category = "poll"
+	item.Title = "你支持哪种解法？"
+	added, err := engine.ReportInClass(PlatformZhidaoCampus, []InClassQuiz{item}, now)
+	if err != nil || added != 1 {
+		t.Fatalf("poll report added=%d err=%v", added, err)
+	}
+	pending := engine.Pending(now.Add(time.Second))
+	if len(pending) != 1 || pending[0].Kind != "in_class" || pending[0].Title != "课上投票 · 你支持哪种解法？" {
+		t.Fatalf("unexpected poll event %+v", pending)
+	}
+	// A poll is urgent for delivery purposes, like a quiz, but the category is
+	// presentation-only: it never carries an answer or submission instruction.
+	if !strings.Contains(pending[0].Body, "离散数学") {
+		t.Fatalf("poll body lost course context: %q", pending[0].Body)
 	}
 }
 

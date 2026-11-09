@@ -4,9 +4,21 @@
 
 新版知到校内课的官方学生 H5 前端包含独立的课堂投票读取链路，可以作为后续只读监测的接入依据。它不是普通作业／考试列表，也不依赖把数值任务类型推测成投票。
 
-**目前完成的是公开客户端静态源码研究，不是实时监测实现或真实课堂验收。** 未调用真实课堂业务接口、未读取真实会话或个人任务快照，也未进行投票、答题、签到、入课或部署。下载的客户端 JavaScript 只作静态阅读，没有执行。
+**当前状态（2026-11-10）：已实现默认开启（可主动关闭）的实验性只读监测，但尚未完成真实会话或真实课堂验收。** 实现只读取官方学生 H5 文档中出现的四个只读端点，不调用入课、投票、签到或提交接口。由于没有用真实知到会话和真实课堂验证，界面与文档都不得宣称“已支持”或承诺检测延迟。
 
-关键阻塞是：已有会话能否在不调用入课接口的情况下读取，以及怎样可靠确认投票仍开放。未解决这两项前，不应在界面宣称已经支持实时投票。
+关键未验证项仍是：已有会话能否在不调用入课接口的情况下读取，以及 `live/list` 的实际查询范围。实现失败时会显示明确错误，不会把失败当成“当前没有投票”。
+
+## 实现（实验，默认开启）
+
+- 设置项 `zhidao_in_class_enabled` 默认 `true`，用户可显式关闭且该选择会持久化；与雨课堂课上提醒相互独立，共用 `in_class_poll_seconds` 检查间隔。
+- `internal/platform/zhidao_classroom.go` 只调用：`GET /student-course/lesson/live/list`、`GET /student-app/interaction/api/lesson/check/finish`、`POST /student-app/interaction/waterfall/list-all`、`GET /student-app/api/vote/getVoteDetail`。
+- 鉴权只读取 `ai-poly` Cookie 并作为原值 `Authorization`；缺少该 Cookie 时返回明确错误，不回退到 `jt-cas`，也不修改现有任务的 token 优先级。
+- `internal/server/zhidao_inclass.go` 在绑定代次、原始会话字符串、开关和进程生命周期任一变化时丢弃本轮结果；失败或畸形快照不会建立基线。
+- 每个课次第一次完整快照作为静默基线；只有 `createTime` 在最近 2 分钟内的投票会在首次快照中提醒，更早的历史投票静默记录。之后仅对未见过的 `lessonId + bizId` 拉取详情并提醒。
+- `isFinish === 1` 视为已结束并静默记录；字段缺失或无法解析时状态标记为未知，通知正文明确写“投票状态暂未确认”，不猜测已结束或未参与。
+- 持久化去重键沿用 `core.PlatformZhidaoCampus`、`lessonId`、`vote:bizId`。不解析 `selectedStudents`、投票人数或任何参与者身份。
+- 不显示投票截止时间：`limitSeconds`、`endTime` 的真实语义尚未验证，不能按字段名推算。
+- 通知只写“打开知到参与投票”，从未包含自动投票能力；全链路没有任何 `student/join`、`student/enter`、`vote/studentVote`、签到或提交调用。
 
 ## 1. 已找到的学生端读取链路
 
@@ -85,9 +97,11 @@ activity = "vote:" + bizId
 
 明确不调用 `student/join`、`student/enter`、`/student-app/api/vote/studentVote`，也不调用签到、答题提交、发布、结束或删除接口。HTTP 方法为 GET 本身并不能证明一个端点没有副作用。
 
-现有接入位置包括 `internal/platform/zhidao.go` 的请求／续期能力、`internal/server/zhidao.go` 的绑定代次保护，以及 `internal/core/inclass.go` 的持久化去重。服务器当前课上循环专用于雨课堂，给知到增加读取方法不会自动启用投票监测；事件文案和结束取消策略也需独立设计。
+现有接入位置包括 `internal/platform/zhidao.go` 的请求／续期能力、`internal/server/zhidao.go` 的绑定代次保护，以及 `internal/core/inclass.go` 的持久化去重。知到投票监测使用独立循环 `runZhidaoInClass`，不会因雨课堂课上提醒开启而自动启用；两边的事件文案、失败策略和开关完全独立。
 
 ## 4. 待验证项与覆盖限制
+
+以下项目在实现完成后仍然全部待验证。当前代码只是按公开客户端契约编写的只读适配器，测试全部使用合成响应，不能替代真实课堂验收。
 
 - 现有会话及已有 `ai-poly` 对学生 H5 网关的鉴权兼容性。
 - 不执行 join／enter 时，是否允许发现课堂、读取快照与详情。

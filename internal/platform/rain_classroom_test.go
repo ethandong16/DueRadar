@@ -19,9 +19,14 @@ func classroomFixture(result, kind string) string {
 
 func classroomFixtureData(t *testing.T, result, kind string) rainClassroomData {
 	t.Helper()
+	return classroomRawData(t, classroomFixture(result, kind))
+}
+
+func classroomRawData(t *testing.T, raw string) rainClassroomData {
+	t.Helper()
 	var env rainEnvelope
 	var data rainClassroomData
-	if err := json.Unmarshal([]byte(classroomFixture(result, kind)), &env); err != nil {
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(env.Data, &data); err != nil {
@@ -110,10 +115,101 @@ func TestClassroomProblemExactIdentityAndResult(t *testing.T) {
 	if !ok || p.AnswerKnown {
 		t.Fatal("missing result guessed as unanswered")
 	}
-	for _, kind := range []string{"Polling", "AnonymousPolling", "Subjective", "Exam", "Quiz"} {
+	for _, kind := range []string{"Polling", "AnonymousPolling"} {
+		p, ok := classroomProblem(classroomFixtureData(t, "null", kind), "10", event)
+		if !ok || !p.IsPoll() || p.Choice() || p.FallbackReady(time.Now()) {
+			t.Fatalf("poll type %s was not detected as a non-answerable poll: %+v, found=%v", kind, p, ok)
+		}
+	}
+	for _, kind := range []string{"Subjective", "Exam", "Quiz"} {
 		if _, ok := classroomProblem(classroomFixtureData(t, "null", kind), "10", event); ok {
 			t.Fatalf("accepted unsupported type %s", kind)
 		}
+	}
+}
+
+// A poll is a first-class detected activity but never an answerable question:
+// its option text is kept for the notification, while every submission path
+// stays closed.
+func TestClassroomPollDetectionIsReadOnly(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name, kind string
+		anonymous  bool
+	}{
+		{"poll", "Polling", false},
+		{"anonymous poll", "AnonymousPolling", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := fmt.Sprintf(`{"status":0,"data":{"activePresentationID":20,"presentationList":[{"presentationID":20,"Title":"第 3 讲","Slides":[{"lessonSlideID":30,"Problem":{"ProblemID":40,"Type":%q,"Body":"你更认同哪种解释？","Result":"A","Bullets":[{"Label":"赞成"},{"Label":"反对"}]}}]}]}}`, tc.kind)
+			event := rainTimelineProblem{Prob: "40", Pres: "20", SID: "30", DT: now.Add(-time.Minute).UnixMilli()}
+			p, ok := classroomProblem(classroomRawData(t, raw), "10", event)
+			if !ok || !p.IsPoll() || p.AnonymousPoll() != tc.anonymous || p.Type != tc.kind {
+				t.Fatalf("poll not detected: %+v, found=%v", p, ok)
+			}
+			if p.Choice() || p.FallbackReady(now) {
+				t.Fatal("poll exposed an automatic answer path")
+			}
+			if len(p.Options) != 2 || p.Options[0] != "赞成" || p.Options[1] != "反对" {
+				t.Fatalf("poll display options lost: %v", p.Options)
+			}
+			if p.Title != "第 3 讲" || p.Body != "你更认同哪种解释？" {
+				t.Fatalf("poll text lost: %+v", p)
+			}
+		})
+	}
+	for _, typ := range []int{3, 4, 10} {
+		p := detectedProblem("10", rainTimelineProblem{Prob: "40", Pres: "20", ProblemType: &typ})
+		if p.ProblemType != typ || p.IsPoll() != (typ == 3) {
+			t.Fatalf("numeric type %d misclassified: %+v", typ, p)
+		}
+	}
+}
+
+func TestClassroomProblemsV3ReadsOnlyPresentationMetadata(t *testing.T) {
+	calls := 0
+	r := rainTestClient(t, func(w http.ResponseWriter, req *http.Request) {
+		calls++
+		if req.Method != "GET" || req.URL.Path != "/api/v3/lesson-summary/student/presentation" {
+			t.Errorf("unexpected presentation request: %s %s", req.Method, req.URL.Path)
+		}
+		if req.URL.Query().Get("lesson_id") != "10" || req.URL.Query().Get("presentation_id") != "20" {
+			t.Errorf("unexpected presentation query: %s", req.URL.RawQuery)
+		}
+		fmt.Fprint(w, `{"code":0,"data":{"title":"课程课件","presentation":{"title":"第二讲"},"slides":[
+			{"problem":{"problemId":"40","problemType":3,"body":"你选哪一个？"}},
+			{"problem":{"content":{"id":"41","type":"MultipleChoice","problemType":2,"body":"1+1?"}}},
+			{"problem":{"problemId":"42","problemType":2}},
+			{"problem":{"problemId":"43","problemType":3,"anonymous":true}},
+			{"problem":{"content":{"id":"44","problemType":3,"anonymous":true}}},
+			{"problem":null},
+			{"problem":{"problemId":"bad"}}
+		]}}`)
+	})
+	problems, err := r.classroomProblemsV3(context.Background(), "10", "20")
+	if err != nil || calls != 1 {
+		t.Fatalf("presentation metadata not read: %v, calls=%d", err, calls)
+	}
+	if p := problems["40"]; p.Type != "Polling" || p.ProblemType != 3 || p.Title != "课程课件" || p.Body != "你选哪一个？" {
+		t.Fatalf("numeric poll not labelled: %+v", p)
+	}
+	if p := problems["41"]; p.Type != "MultipleChoice" || p.ProblemType != 2 || p.Body != "1+1?" {
+		t.Fatalf("nested content not read: %+v", p)
+	}
+	// A non-poll numeric type stays metadata; it must not be translated into an
+	// answerable type or an automatic submission path.
+	if p := problems["42"]; p.Type != "" || p.ProblemType != 2 || p.Body != "" {
+		t.Fatalf("non-poll numeric type was interpreted: %+v", p)
+	}
+	// The v3 API marks anonymity with a boolean rather than a distinct type.
+	if p := problems["43"]; p.Type != "AnonymousPolling" || !p.Anonymous || p.ProblemType != 3 {
+		t.Fatalf("anonymous poll not labelled: %+v", p)
+	}
+	if p := problems["44"]; p.Type != "AnonymousPolling" || !p.Anonymous {
+		t.Fatalf("nested anonymous poll not labelled: %+v", p)
+	}
+	if len(problems) != 5 {
+		t.Fatalf("unexpected problem count: %v", problems)
 	}
 }
 
@@ -394,6 +490,11 @@ func TestClassroomSocketV3StringTimelineWithoutBootstrap(t *testing.T) {
 			fmt.Fprint(w, `{"errorcode":500,"errormsg":"'NoneType' object has no attribute 'set_cookie'"}`)
 		case "/api/v3/user/basic-info":
 			fmt.Fprint(w, `{"code":0,"data":{"id":"96351415"}}`)
+		case "/api/v3/lesson-summary/student/presentation":
+			if req.Method != "GET" || req.URL.Query().Get("lesson_id") != "1811530394936651392" || req.URL.Query().Get("presentation_id") != "1811535912082150912" {
+				t.Errorf("unsafe presentation request: %s %s", req.Method, req.URL.RawQuery)
+			}
+			fmt.Fprint(w, `{"code":0,"data":{"title":"概率统计","presentation":{"title":"第三章"},"slides":[{"problem":{"problemId":"1811535912124093961","problemType":3,"body":"你更喜欢哪种推导？"}}]}}`)
 		case "/wsapp/":
 			conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{InsecureSkipVerify: true})
 			if err != nil {
@@ -439,6 +540,11 @@ func TestClassroomSocketV3StringTimelineWithoutBootstrap(t *testing.T) {
 	p := <-observed
 	if p.ID != "1811535912124093961" || p.PresentationID != "1811535912082150912" || p.StartedAt.IsZero() || p.Deadline.Sub(p.StartedAt) != time.Minute || p.Choice() {
 		t.Fatalf("unexpected detect-only problem: %+v", p)
+	}
+	// The v3 summary labelled this timeline problem as a poll. The text is used
+	// for the notification, but the problem still has no answer path.
+	if !p.IsPoll() || p.ProblemType != 3 || p.Type != "Polling" || p.Title != "概率统计" || p.Body != "你更喜欢哪种推导？" {
+		t.Fatalf("v3 poll metadata lost: %+v", p)
 	}
 	socketWrite(t, ctx, peer, map[string]any{"op": "unlockproblem", "problem": map[string]any{
 		"prob": "1811535912124093962", "pres": "1811535912082150912", "sid": "1811535912124093962", "dt": now, "limit": 45,

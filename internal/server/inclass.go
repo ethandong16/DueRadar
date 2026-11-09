@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -386,6 +388,28 @@ func (s *Server) testInClass(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "请先配置 Bark 通知")
 		return
 	}
+	kind := ""
+	if r.Body != nil {
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+		if err != nil {
+			fail(w, 400, "测试请求无效")
+			return
+		}
+		if len(raw) > 0 {
+			var request struct {
+				Kind string `json:"kind"`
+			}
+			if json.Unmarshal(raw, &request) != nil {
+				fail(w, 400, "测试请求无效")
+				return
+			}
+			kind = request.Kind
+		}
+	}
+	if kind != "" && kind != "quiz" && kind != "poll" {
+		fail(w, 400, "测试类型无效")
+		return
+	}
 	now := time.Now()
 	item := core.InClassQuiz{
 		ClassroomID: "test",
@@ -395,6 +419,13 @@ func (s *Server) testInClass(w http.ResponseWriter, r *http.Request) {
 		Body:        "DueRadar 课上答题提醒链路正常。\n真实课堂出现新的随堂答题时，会以同样方式立即提醒，静默时段也照常发送。",
 		Notify:      true,
 	}
+	message := "课上答题测试通知已发送"
+	if kind == "poll" {
+		item.Category = "poll"
+		item.Title = "投票链路测试"
+		item.Body = "DueRadar 课上投票提醒链路正常。\n真实课堂出现新的投票时，会以同样方式立即提醒，静默时段也照常发送；程序不会自动投票。"
+		message = "课上投票测试通知已发送"
+	}
 	added, err := s.Engine.ReportInClass(core.PlatformRain, []core.InClassQuiz{item}, now)
 	if err != nil || added == 0 {
 		fail(w, 500, "测试通知创建失败")
@@ -403,5 +434,5 @@ func (s *Server) testInClass(w http.ResponseWriter, r *http.Request) {
 	deliverCtx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	s.Deliver(deliverCtx)
-	jsonResponse(w, 200, map[string]string{"message": "课上答题测试通知已发送"})
+	jsonResponse(w, 200, map[string]string{"message": message})
 }
