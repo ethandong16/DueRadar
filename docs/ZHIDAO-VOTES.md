@@ -4,7 +4,7 @@
 
 新版知到校内课的官方学生 H5 前端包含独立的课堂投票读取链路，可以作为后续只读监测的接入依据。它不是普通作业／考试列表，也不依赖把数值任务类型推测成投票。
 
-**当前状态（2026-11-10）：已在真实概统课堂完成只读读取验证；新投票的实时 Bark 到达仍待观察。** 生产实例成功读取进行中课次、投票发布信令和投票详情，四个只读端点均返回 200。当天 08:21 的课堂投票在修复后的首次完整快照前已结束（`isFinish=1`，限时 300 秒），因此按基线规则静默记录，没有补发通知；这不能替代一条新投票从发布到 Bark 到达的完整验收。
+**当前状态（2026-11-10）：已在真实概统课堂完成只读读取验证；新投票的实时 Bark 到达仍待观察。** 生产实例成功读取进行中课次、投票发布信令和投票详情，四个只读端点均返回 200。当天 08:21 的课堂投票在修复后的首次完整快照前已由本人投过（`isFinish=1` 表示当前账号已投票，限时 300 秒），因此按基线规则静默记录，没有补发通知；这不能替代一条新投票从发布到 Bark 到达的完整验收。
 
 关键未验证项：新投票在直播期间的检测与 Bark 到达时延，以及投票删除、延时、重新发布等边界。实现只读取官方学生 H5 文档中出现的四个只读端点，不调用入课、投票、签到或提交接口。由于尚未完成上述验收，界面与文档都不得宣称“已支持”或承诺检测延迟。实现失败时会显示明确错误，不会把失败当成“当前没有投票”。
 
@@ -16,9 +16,9 @@
 - 实测格式：`lessonId` 与 `voteId` 是 10 位字母数字串，不是纯数字；瀑布流同时提供 `createTime`（`YYYY-MM-DD HH:MM:SS`，中国时间）和 `msgTime`（epoch 秒），实现优先使用 `msgTime`。口述快速投票的 `optionContent` 为 `null`，仅返回 A/B/C 的 `optionCode`，实现回退显示编码。
 - `internal/server/zhidao_inclass.go` 在绑定代次、原始会话字符串、开关和进程生命周期任一变化时丢弃本轮结果；失败或畸形快照不会建立基线。
 - 每个课次第一次完整快照作为静默基线；只有 `createTime` 在最近 2 分钟内的投票会在首次快照中提醒，更早的历史投票静默记录。之后仅对未见过的 `lessonId + bizId` 拉取详情并提醒。
-- `isFinish === 1` 视为已结束并静默记录；字段缺失或无法解析时状态标记为未知，通知正文明确写“投票状态暂未确认”，不猜测已结束或未参与。
+- `isFinish` 只表示当前账号是否已投票，不表示投票结束；已投票或已过结束时间（优先取 `endTime`，缺失时由 `startTime + limitSeconds` 推断）的投票静默记录。字段缺失或无法解析时状态标记为未知，通知正文明确写“投票状态暂未确认”，不猜测已结束或未参与。
 - 持久化去重键沿用 `core.PlatformZhidaoCampus`、`lessonId`、`vote:bizId`。不解析 `selectedStudents`、投票人数或任何参与者身份。
-- 不显示投票截止时间：`limitSeconds`、`endTime` 的真实语义尚未验证，不能按字段名推算。
+- 通知不显示截止时间：`endTime` 与 `startTime + limitSeconds` 只用于判断投票是否已结束，不写入通知正文；无法无歧义解析时保持未知并照常提醒。
 - 通知只写“打开知到参与投票”，从未包含自动投票能力；全链路没有任何 `student/join`、`student/enter`、`vote/studentVote`、签到或提交调用。
 
 ## 1. 已找到的学生端读取链路
@@ -30,7 +30,7 @@
 | 发现正在上课的课次 | GET `/student-course/lesson/live/list` | 调用点无显式参数，公共拦截器可能补 `courseId, term`；返回列表消费 `lessonId, courseId, term, courseName, endTime` |
 | 学生课堂基础信息 | GET `/student-app/interaction/api/lesson/basic/info` | `lessonId` 及课程上下文；消费 `courseId, term, lessonId, groupId, lessonType, startTime` |
 | 课堂互动快照 | POST `/student-app/interaction/waterfall/list-all` | JSON `{lessonId, queryType:"ALL"}`，公共层另补 `courseId, term`；消费 `{code:200,data:[...]}` |
-| 投票详情 | GET `/student-app/api/vote/getVoteDetail` | `voteId` 及课程上下文；消费 `voteId, title, isQuickVote, checkType, isFinish, options` |
+| 投票详情 | GET `/student-app/api/vote/getVoteDetail` | `voteId` 及课程上下文；消费 `voteId, title, isQuickVote, checkType, isFinish, options`；实现另读取可选的 `startTime, endTime, limitSeconds` 判断是否已结束 |
 | 课次结束状态 | GET `/student-app/interaction/api/lesson/check/finish` | `lessonId` 及课程上下文；前端在 `code===200` 时把 `data===false` 视为未结束 |
 
 这些字段是前端消费的形状，不是完整服务端 schema，也不是脱敏真实响应。`lessonId` 表示一次课堂，不能用教学班 `classId` 代替。`live/list` 调用点无参数不等于已经证明裸 GET 会返回全账号全部课堂；需分别验证无上下文与按课程／学期查询的范围。
@@ -71,11 +71,11 @@ activity = "vote:" + bizId
 
 前端还消费 `participated`、`createTime`、`isFinish` 与选项中的参与者记录：
 
-- 组件以 `isFinish === 1` 判断已结束；不能反推缺少该字段就表示仍开放。
-- 缺少 `participated` 不得自动解释为未参与；已参与和已结束应分别建模。
+- 组件以 `isFinish === 1` 标记当前账号已投票；它不是投票结束标记。已参与和已结束必须分别建模，不能互相反推。
+- 缺少 `participated`／`isFinish` 不得自动解释为未参与；未知状态仍提醒并注明未确认。
 - `isShowAnswer`／`isShowResult` 不代表投票是否开放。
 - 快速投票与自定义投票均规范化为 `VOTE`；题型包括 `single`、`multi`、`judgment`。
-- 组件对 `limitSeconds`、`endTime` 的计算不是普通的“截止减现在”；单位、时区、无限时编码和字段业务含义尚待实测，不能根据名字生成截止时间。
+- 组件对 `limitSeconds`、`endTime` 的计算不是普通的“截止减现在”；单位、时区、无限时编码和字段业务含义尚待实测，不能根据名字生成要展示的截止时间。实现仅在能无歧义解析时用它们判断是否已结束，且只用于抑制通知。
 - 投票详情可能包含同学标识等信息。只读适配器应丢弃参与者姓名、头像、个体投票记录等无关数据，仅保留必要的自身状态及投票元数据，不写入任务快照、日志或通知。
 
 ## 3. 实时机制与最小方案
@@ -127,6 +127,6 @@ activity = "vote:" + bizId
 | 学生投票映射 | [message-handlers-BotQAkyC.js](https://classroom-h5.polymas.com/assets/shared/message-handlers-BotQAkyC.js)：`IN_CLASS_TOOL_VOTE_PUBLISH`、`idField:"bizId"` |
 | 信令名称 | [ai-signal-action-Xo3RRWXP.js](https://classroom-h5.polymas.com/assets/shared/ai-signal-action-Xo3RRWXP.js)：`IN_CLASS::TOOL-VOTE::PUBLISH` 等 |
 | 课堂结束及前台刷新 | [DiscussionIcon-CtdS8NX2.js](https://classroom-h5.polymas.com/assets/shared/DiscussionIcon-CtdS8NX2.js)：`checkLessonStatus`、`visibilitychange` |
-| 投票状态及计时 | [学生投票组件](https://classroom-h5.polymas.com/assets/modules/room-stu/index-BJIDjldV.js)：`isFinish===1`、`selectedStudents`、`limitSeconds` |
+| 投票状态及计时 | [学生投票组件](https://classroom-h5.polymas.com/assets/modules/room-stu/index-BJIDjldV.js)：`isFinish===1` 表示本人已投票、`selectedStudents`、`limitSeconds` |
 | IM 初始化边界 | [useStudentImSession--WPA7LEf.js](https://classroom-h5.polymas.com/assets/shared/useStudentImSession--WPA7LEf.js)：`businessType:"TX"`、`TIMCustomElem`；[IM wrapper](https://classroom-h5.polymas.com/assets/shared/im-monitor-DQuB511y.js)：`/signalling/user/v1/sig`、`onMessageReceived` |
 | 另一条 PC 学生网关 | [index-BUeXDOKM.js](https://hike-teaching-center.polymas.com/classroom_hub/assets/index-BUeXDOKM.js)：`/student-course/lesson/live/waterfall/list-all`；尚未证明与 H5 投票覆盖等价 |

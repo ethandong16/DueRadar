@@ -100,7 +100,7 @@ func TestZhidaoInClassBaselineNewVoteAndDedup(t *testing.T) {
 			},
 		},
 		polls: map[string]platform.ZhidaoPoll{
-			"9002": {ID: "9002", Title: "刚发布的投票", Options: []string{"赞成", "反对"}, Anonymous: true, StatusKnown: true},
+			"9002": {ID: "9002", Title: "刚发布的投票", Options: []string{"赞成", "反对"}, Anonymous: true, ParticipationKnown: true},
 		},
 	}
 	prepareZhidaoInClass(t, s, true, fake)
@@ -154,7 +154,7 @@ func TestZhidaoInClassBaselineNewVoteAndDedup(t *testing.T) {
 	}
 	// A genuinely new vote on the next poll is announced.
 	fake.signals = append(fake.signals, platform.ZhidaoPollSignal{ID: "9003", Title: "第三个投票", CreatedAt: now})
-	fake.polls["9003"] = platform.ZhidaoPoll{ID: "9003", Title: "第三个投票", StatusKnown: true}
+	fake.polls["9003"] = platform.ZhidaoPoll{ID: "9003", Title: "第三个投票", ParticipationKnown: true}
 	s.checkZhidaoInClass(context.Background())
 	eventually(t, func() bool {
 		mu.Lock()
@@ -163,16 +163,16 @@ func TestZhidaoInClassBaselineNewVoteAndDedup(t *testing.T) {
 	})
 }
 
-func TestZhidaoInClassFinishedVoteStaysSilent(t *testing.T) {
+func TestZhidaoInClassParticipatedVoteStaysSilent(t *testing.T) {
 	s, _ := testApp(t)
 	now := time.Now()
 	fake := &fakeZhidaoDetail{
 		fakeZhidaoInClass: fakeZhidaoInClass{
 			lessons: []platform.ZhidaoPollLesson{zhidaoTestLesson()},
-			signals: []platform.ZhidaoPollSignal{{ID: "9001", Title: "已结束", CreatedAt: now.Add(-time.Minute)}},
+			signals: []platform.ZhidaoPollSignal{{ID: "9001", Title: "已投票", CreatedAt: now.Add(-time.Minute)}},
 		},
 		polls: map[string]platform.ZhidaoPoll{
-			"9001": {ID: "9001", Title: "已结束", StatusKnown: true, Finished: true},
+			"9001": {ID: "9001", Title: "已投票", ParticipationKnown: true, Participated: true},
 		},
 	}
 	prepareZhidaoInClass(t, s, true, fake)
@@ -180,14 +180,37 @@ func TestZhidaoInClassFinishedVoteStaysSilent(t *testing.T) {
 	s.sendBark = func(context.Context, string, string, string, string) error { pushes.Add(1); return nil }
 	s.checkZhidaoInClass(context.Background())
 	if pushes.Load() != 0 {
-		t.Fatal("finished vote notified")
+		t.Fatal("already-answered vote notified")
 	}
 	if !s.Engine.SeenInClass(core.PlatformZhidaoCampus, "123", "vote:9001") {
-		t.Fatal("finished vote was not recorded silently")
+		t.Fatal("already-answered vote was not recorded silently")
 	}
 	s.checkZhidaoInClass(context.Background())
 	if fake.detailsGot.Load() != 1 {
-		t.Fatalf("finished vote detail re-fetched: %d", fake.detailsGot.Load())
+		t.Fatalf("recorded vote detail re-fetched: %d", fake.detailsGot.Load())
+	}
+}
+
+func TestZhidaoInClassEndedVoteStaysSilent(t *testing.T) {
+	s, _ := testApp(t)
+	fake := &fakeZhidaoDetail{
+		fakeZhidaoInClass: fakeZhidaoInClass{
+			lessons: []platform.ZhidaoPollLesson{zhidaoTestLesson()},
+			signals: []platform.ZhidaoPollSignal{{ID: "9001", Title: "已结束", CreatedAt: time.Now()}},
+		},
+		polls: map[string]platform.ZhidaoPoll{
+			"9001": {ID: "9001", Title: "已结束", ParticipationKnown: true, EndKnown: true, EndAt: time.Now().Add(-time.Minute)},
+		},
+	}
+	prepareZhidaoInClass(t, s, true, fake)
+	var pushes atomic.Int32
+	s.sendBark = func(context.Context, string, string, string, string) error { pushes.Add(1); return nil }
+	s.checkZhidaoInClass(context.Background())
+	if pushes.Load() != 0 {
+		t.Fatal("ended vote notified")
+	}
+	if !s.Engine.SeenInClass(core.PlatformZhidaoCampus, "123", "vote:9001") {
+		t.Fatal("ended vote was not recorded silently")
 	}
 }
 
@@ -199,7 +222,7 @@ func TestZhidaoInClassFailureDoesNotEstablishBaseline(t *testing.T) {
 			signalErr: errors.New("fixture waterfall failure"),
 		},
 		polls: map[string]platform.ZhidaoPoll{
-			"9001": {ID: "9001", Title: "恢复后的投票", StatusKnown: true},
+			"9001": {ID: "9001", Title: "恢复后的投票", ParticipationKnown: true},
 		},
 	}
 	prepareZhidaoInClass(t, s, true, fake)

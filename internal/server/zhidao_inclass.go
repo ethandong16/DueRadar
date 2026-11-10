@@ -201,7 +201,10 @@ func (s *Server) checkZhidaoInClass(parent context.Context) {
 						continue
 					}
 					poll = detail
-					if poll.StatusKnown && poll.Finished {
+					if poll.ParticipationKnown && poll.Participated {
+						notify = false
+					}
+					if poll.EndKnown && !poll.EndAt.After(now) {
 						notify = false
 					}
 				}
@@ -228,7 +231,14 @@ func (s *Server) checkZhidaoInClass(parent context.Context) {
 				}
 				continue
 			}
-			notify := !detail.StatusKnown || !detail.Finished
+			// isFinish only says whether this account already voted. A vote
+			// that has already been answered or whose derived end time has
+			// passed is recorded silently. Unknown participation still
+			// notifies, and an unknown end adds an explicit note.
+			notify := !detail.ParticipationKnown || !detail.Participated
+			if detail.EndKnown && !detail.EndAt.After(now) {
+				notify = false
+			}
 			items = append(items, zhidaoPollItem(lesson, signal, detail, notify))
 		}
 		if interrupted {
@@ -333,7 +343,7 @@ func zhidaoPollBody(lesson platform.ZhidaoPollLesson, poll platform.ZhidaoPoll) 
 	if len(options) > 0 {
 		parts = append(parts, "选项："+strings.Join(options, " / "))
 	}
-	if !poll.StatusKnown {
+	if !poll.EndKnown {
 		parts = append(parts, "投票状态暂未确认，请打开知到查看")
 	}
 	parts = append(parts, "打开知到参与投票")

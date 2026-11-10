@@ -27,7 +27,7 @@
 
 - 新版校内课存在独立读取链路：`/student-course/lesson/live/list` 发现课次，`/student-app/interaction/api/lesson/check/finish` 过滤已结束课次，`/student-app/interaction/waterfall/list-all` 获取互动快照，识别 `IN_CLASS::TOOL-VOTE::PUBLISH`，将 `bizId` 作为 `voteId` 查询 `/student-app/api/vote/getVoteDetail`。
 - 课堂请求只使用 `ai-poly` Cookie 的原值 `Authorization`；缺少该 Cookie 时明确报错，不回退 `jt-cas`，也不改变现有任务同步的 token 优先级。
-- 首次完整快照建立静默基线，最近 2 分钟内发布的投票仍会提醒；之后按 `lessonId + bizId` 持久化去重。快照失败或畸形时不当成空列表，也不建立基线。`isFinish` 未知时通知注明“状态暂未确认”，不猜测。
+- 首次完整快照建立静默基线，最近 2 分钟内发布的投票仍会提醒；之后按 `lessonId + bizId` 持久化去重。快照失败或畸形时不当成空列表，也不建立基线。`isFinish` 只表示本账号是否已投票；已投票或已结束的投票静默记录，结束时间未知时仍提醒并注明“状态暂未确认”。
 - 已有会话能否在不调用入课接口的情况下读取、`live/list` 的实际查询范围、token 与课程上下文的兼容性、投票删除／延时语义，均需独立验证。新版证据不代表旧版翻转课或共享课也受支持。
 - 不触发入课、投票、答题提交或签到，不读取／输出真实凭据和个人快照，也不将同学的参与明细写入任务、日志或通知；通知只提示打开知到，不包含自动投票能力。
 

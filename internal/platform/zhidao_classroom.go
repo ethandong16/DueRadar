@@ -46,14 +46,21 @@ type ZhidaoPollSignal struct {
 }
 
 // ZhidaoPoll is the read-only subset of a vote detail. Participant identities
-// and result counts are intentionally never parsed.
+// and result counts are intentionally never parsed. isFinish describes whether
+// this account has already voted; it does not say whether the vote is closed.
 type ZhidaoPoll struct {
-	ID          string
-	Title       string
-	Options     []string
-	Anonymous   bool
-	StatusKnown bool
-	Finished    bool
+	ID        string
+	Title     string
+	Options   []string
+	Anonymous bool
+	// Participated is the platform's isFinish flag: this account has voted.
+	// ParticipationKnown distinguishes "not voted" from a missing field.
+	Participated       bool
+	ParticipationKnown bool
+	// EndAt is derived from endTime, or from startTime plus limitSeconds.
+	// EndKnown is false when neither source is usable.
+	EndAt    time.Time
+	EndKnown bool
 }
 
 type zhidaoIdentifier string
@@ -457,12 +464,15 @@ func (z *Zhidao) PollDetail(ctx context.Context, lesson ZhidaoPollLesson, voteID
 		return ZhidaoPoll{}, errors.New("知到投票详情读取失败")
 	}
 	var data struct {
-		VoteID      zhidaoIdentifier `json:"voteId"`
-		ID          zhidaoIdentifier `json:"id"`
-		Title       string           `json:"title"`
-		IsAnonymous bool             `json:"isAnonymous"`
-		IsFinish    json.RawMessage  `json:"isFinish"`
-		Options     []struct {
+		VoteID       zhidaoIdentifier `json:"voteId"`
+		ID           zhidaoIdentifier `json:"id"`
+		Title        string           `json:"title"`
+		IsAnonymous  bool             `json:"isAnonymous"`
+		IsFinish     json.RawMessage  `json:"isFinish"`
+		StartTime    json.RawMessage  `json:"startTime"`
+		EndTime      json.RawMessage  `json:"endTime"`
+		LimitSeconds zhidaoFlexInt    `json:"limitSeconds"`
+		Options      []struct {
 			OptionContent string `json:"optionContent"`
 			OptionCode    string `json:"optionCode"`
 		} `json:"options"`
@@ -498,11 +508,29 @@ func (z *Zhidao) PollDetail(ctx context.Context, lesson ZhidaoPollLesson, voteID
 			break
 		}
 	}
-	known, finished := zhidaoFinishState(data.IsFinish)
-	return ZhidaoPoll{ID: id, Title: title, Options: options, Anonymous: data.IsAnonymous, StatusKnown: known, Finished: finished}, nil
+	known, participated := zhidaoParticipationState(data.IsFinish)
+	endAt := zhidaoFlexTime(data.EndTime)
+	if endAt.IsZero() {
+		if start := zhidaoFlexTime(data.StartTime); !start.IsZero() && data.LimitSeconds > 0 && data.LimitSeconds <= 7*24*3600 {
+			endAt = start.Add(time.Duration(data.LimitSeconds) * time.Second)
+		}
+	}
+	return ZhidaoPoll{
+		ID:                 id,
+		Title:              title,
+		Options:            options,
+		Anonymous:          data.IsAnonymous,
+		Participated:       participated,
+		ParticipationKnown: known,
+		EndAt:              endAt,
+		EndKnown:           !endAt.IsZero(),
+	}, nil
 }
 
-func zhidaoFinishState(raw json.RawMessage) (known, finished bool) {
+// zhidaoParticipationState reads isFinish, which the official student client
+// uses for "this account has already voted". The vote's own end state must be
+// derived from its timing fields instead.
+func zhidaoParticipationState(raw json.RawMessage) (known, participated bool) {
 	text := strings.TrimSpace(string(raw))
 	if text == "" || text == "null" {
 		return false, false

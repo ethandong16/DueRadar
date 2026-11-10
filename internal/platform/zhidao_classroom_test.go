@@ -76,7 +76,7 @@ func TestZhidaoLivePollsUseOnlyReadOnlyEndpoints(t *testing.T) {
 			if r.URL.Query().Get("voteId") != "9001" || r.URL.Query().Get("courseId") != "course-1" || r.URL.Query().Get("term") != "20271" {
 				t.Errorf("unexpected vote query %s", r.URL.RawQuery)
 			}
-			return zhsResponse(r, 200, `{"code":200,"data":{"voteId":9001,"title":"你支持哪种解法？","isAnonymous":true,"isFinish":0,"checkType":"single","options":[
+			return zhsResponse(r, 200, `{"code":200,"data":{"voteId":9001,"title":"你支持哪种解法？","isAnonymous":true,"isFinish":0,"startTime":"2026-11-10 10:00:00","endTime":"2026-11-10 10:05:00","limitSeconds":300,"checkType":"single","options":[
 				{"voteOptionId":1,"optionContent":" 赞成 ","selectedStudents":[{"studentId":"classmate"}]},
 				{"voteOptionId":2,"optionContent":"反对"},
 				{"voteOptionId":3,"optionCode":"C","optionContent":null}
@@ -116,7 +116,7 @@ func TestZhidaoLivePollsUseOnlyReadOnlyEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if poll.ID != "9001" || poll.Title != "你支持哪种解法？" || !poll.Anonymous || !poll.StatusKnown || poll.Finished {
+	if poll.ID != "9001" || poll.Title != "你支持哪种解法？" || !poll.Anonymous || !poll.ParticipationKnown || poll.Participated || !poll.EndKnown || !poll.EndAt.Equal(time.Date(2026, 11, 10, 10, 5, 0, 0, zhidaoPollZone)) {
 		t.Fatalf("poll=%+v", poll)
 	}
 	if len(poll.Options) != 3 || poll.Options[0] != "赞成" || poll.Options[1] != "反对" || poll.Options[2] != "C" {
@@ -171,14 +171,27 @@ func TestZhidaoLivePollsRejectIncompleteSnapshots(t *testing.T) {
 			t.Fatalf("401 not reported as expired: %v", err)
 		}
 	})
-	t.Run("unknown finish flag", func(t *testing.T) {
+	t.Run("unknown participation and timing", func(t *testing.T) {
 		z := zhidaoPollClient(t, func(r *http.Request) (*http.Response, error) {
 			return zhsResponse(r, 200, `{"code":200,"data":{"voteId":9001,"title":"vote","options":[]}}`, nil), nil
 		})
 		lesson := ZhidaoPollLesson{LessonID: "123", CourseID: "c", Term: 20271}
 		poll, err := z.PollDetail(context.Background(), lesson, "9001")
-		if err != nil || poll.StatusKnown {
-			t.Fatalf("unknown finish state must stay unknown: %+v %v", poll, err)
+		if err != nil || poll.ParticipationKnown || poll.EndKnown {
+			t.Fatalf("unknown states must stay unknown: %+v %v", poll, err)
+		}
+	})
+	t.Run("isFinish means the account has voted", func(t *testing.T) {
+		z := zhidaoPollClient(t, func(r *http.Request) (*http.Response, error) {
+			return zhsResponse(r, 200, `{"code":200,"data":{"voteId":9001,"title":"vote","isFinish":1,"startTime":"2026-11-10 10:00:00","limitSeconds":300,"options":[]}}`, nil), nil
+		})
+		lesson := ZhidaoPollLesson{LessonID: "123", CourseID: "c", Term: 20271}
+		poll, err := z.PollDetail(context.Background(), lesson, "9001")
+		if err != nil || !poll.ParticipationKnown || !poll.Participated {
+			t.Fatalf("isFinish not read as participation: %+v %v", poll, err)
+		}
+		if !poll.EndKnown || !poll.EndAt.Equal(time.Date(2026, 11, 10, 10, 5, 0, 0, zhidaoPollZone)) {
+			t.Fatalf("end time not derived from startTime and limitSeconds: %+v", poll)
 		}
 	})
 }
