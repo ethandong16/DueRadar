@@ -16,7 +16,7 @@
 - 实测格式：`lessonId` 与 `voteId` 是 10 位字母数字串，不是纯数字；瀑布流同时提供 `createTime`（`YYYY-MM-DD HH:MM:SS`，中国时间）和 `msgTime`（epoch 秒），实现优先使用 `msgTime`。口述快速投票的 `optionContent` 为 `null`，仅返回 A/B/C 的 `optionCode`，实现回退显示编码。
 - `internal/server/zhidao_inclass.go` 在绑定代次、原始会话字符串、开关和进程生命周期任一变化时丢弃本轮结果；失败或畸形快照不会建立基线。
 - 每个课次第一次完整快照作为静默基线；只有 `createTime` 在最近 2 分钟内的投票会在首次快照中提醒，更早的历史投票静默记录。之后仅对未见过的 `lessonId + bizId` 拉取详情并提醒。
-- `isFinish` 只表示当前账号是否已投票，不表示投票结束；已投票或已过结束时间（优先取 `endTime`，缺失时由 `startTime + limitSeconds` 推断）的投票静默记录。字段缺失或无法解析时状态标记为未知，通知正文明确写“投票状态暂未确认”，不猜测已结束或未参与。
+- `isFinish` 只表示当前账号是否已投票，不表示投票结束；已投票或已过结束时间（优先取 `endTime`，缺失时由 `startTime + limitSeconds` 推断）的投票静默记录。字段缺失或无法解析时状态标记为未知；结束时间未知时通知正文明确写“投票状态暂未确认”，不猜测已结束或未参与。
 - 持久化去重键沿用 `core.PlatformZhidaoCampus`、`lessonId`、`vote:bizId`。不解析 `selectedStudents`、投票人数或任何参与者身份。
 - 通知不显示截止时间：`endTime` 与 `startTime + limitSeconds` 只用于判断投票是否已结束，不写入通知正文；无法无歧义解析时保持未知并照常提醒。
 - 通知只写“打开知到参与投票”，从未包含自动投票能力；全链路没有任何 `student/join`、`student/enter`、`vote/studentVote`、签到或提交调用。
