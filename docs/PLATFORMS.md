@@ -23,7 +23,7 @@
 
 ## 知到课堂投票
 
-已提供默认开启（可主动关闭）的实验性只读监测，但尚未完成真实会话或真实课堂验收。具体接口、来源证据、实现边界和未知项见 [知到课堂投票研究](ZHIDAO-VOTES.md)。
+已提供默认开启（可主动关闭）的实验性只读监测；2026-11-10 已在真实课堂验证会话、课次、信令与详情读取，新投票的实时 Bark 到达仍待观察。具体接口、来源证据、实现边界和未知项见 [知到课堂投票研究](ZHIDAO-VOTES.md)。
 
 - 新版校内课存在独立读取链路：`/student-course/lesson/live/list` 发现课次，`/student-app/interaction/api/lesson/check/finish` 过滤已结束课次，`/student-app/interaction/waterfall/list-all` 获取互动快照，识别 `IN_CLASS::TOOL-VOTE::PUBLISH`，将 `bizId` 作为 `voteId` 查询 `/student-app/api/vote/getVoteDetail`。
 - 课堂请求只使用 `ai-poly` Cookie 的原值 `Authorization`；缺少该 Cookie 时明确报错，不回退 `jt-cas`，也不改变现有任务同步的 token 优先级。
