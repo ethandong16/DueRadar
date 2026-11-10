@@ -20,6 +20,7 @@
 - 持久化去重键沿用 `core.PlatformZhidaoCampus`、`lessonId`、`vote:bizId`。不解析 `selectedStudents`、投票人数或任何参与者身份。
 - 通知不显示截止时间：`endTime` 与 `startTime + limitSeconds` 只用于判断投票是否已结束，不写入通知正文；无法无歧义解析时保持未知并照常提醒。
 - 通知只写“打开知到参与投票”，从未包含自动投票能力；全链路没有任何 `student/join`、`student/enter`、`vote/studentVote`、签到或提交调用。
+- 可选“投票强提醒（睡眠叫醒）”默认关闭，只影响投票事件：使用 Bark `critical` 级别、最大音量和重复响铃；普通任务提醒保持原样。需要 Bark App 授予关键提醒权限。
 
 ## 1. 已找到的学生端读取链路
 

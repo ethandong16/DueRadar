@@ -24,11 +24,44 @@ func Validate(server, key string) error {
 	return nil
 }
 
+// Options are the optional delivery controls supported by the official Bark
+// server. Wake is deliberately loud: critical level bypasses silent mode (when
+// the Bark app has critical-alert permission), volume is raised to the maximum,
+// and call repeats the alert sound for about 30 seconds.
+type Options struct {
+	Level  string
+	Volume int
+	Call   bool
+	Sound  string
+}
+
+// Wake is the strongest alert Bark offers for a short-lived classroom vote.
+func Wake() Options {
+	return Options{Level: "critical", Volume: 10, Call: true}
+}
+
 func Send(ctx context.Context, server, key, title, body string) error {
+	return SendWithOptions(ctx, server, key, title, body, Options{})
+}
+
+func SendWithOptions(ctx context.Context, server, key, title, body string, opts Options) error {
 	if err := Validate(server, key); err != nil {
 		return err
 	}
-	data, _ := json.Marshal(map[string]string{"device_key": key, "title": title, "body": body, "group": "DueRadar"})
+	payload := map[string]any{"device_key": key, "title": title, "body": body, "group": "DueRadar"}
+	if opts.Level != "" {
+		payload["level"] = opts.Level
+	}
+	if opts.Volume > 0 {
+		payload["volume"] = opts.Volume
+	}
+	if opts.Call {
+		payload["call"] = 1
+	}
+	if opts.Sound != "" {
+		payload["sound"] = opts.Sound
+	}
+	data, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(server, "/")+"/push", bytes.NewReader(data))
 	if err != nil {
 		return errors.New("Bark 请求构造失败")

@@ -43,6 +43,10 @@ type Settings struct {
 	// read-only, experimental, independent of Rain Classroom monitoring, and on
 	// by default; the user can switch it off and that explicit choice persists.
 	ZhidaoInClassEnabled bool `json:"zhidao_in_class_enabled"`
+	// PollWakeEnabled turns poll alerts into Bark critical notifications that
+	// bypass silent mode and repeat the sound. It is off by default and only
+	// affects in-class poll events, never ordinary task reminders.
+	PollWakeEnabled bool `json:"poll_wake_enabled"`
 	// Both classroom assistants are opt-in and independent of reminder delivery.
 	RainFallbackEnabled bool `json:"rain_fallback_enabled"`
 	RainAnalysisEnabled bool `json:"rain_analysis_enabled"`
@@ -77,6 +81,7 @@ type Event struct {
 	TaskID        string     `json:"task_id,omitempty"`
 	Platform      string     `json:"platform"`
 	Kind          string     `json:"kind"`
+	Category      string     `json:"category,omitempty"`
 	Title         string     `json:"title"`
 	Body          string     `json:"body"`
 	DueAt         time.Time  `json:"due_at"`

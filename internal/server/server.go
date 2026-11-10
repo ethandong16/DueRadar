@@ -96,7 +96,7 @@ type Server struct {
 	jobs              sync.WaitGroup
 	startRain         func(context.Context) (*rainFlow, error)
 	newRain           func(string) rainAdapter
-	sendBark          func(context.Context, string, string, string, string) error
+	sendBark          func(context.Context, string, string, string, string, bark.Options) error
 	deliveryError     string // Active queue/result persistence error; transport health is derived from durable events.
 	deliveryAt        *time.Time
 	deliveryResult    *deliveryOutcome
@@ -109,7 +109,9 @@ func New(engine *core.Engine, credentials *vault.Vault, password string, demo, s
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{Engine: engine, Vault: credentials, Demo: demo, SecureCookies: secure, password: sha256.Sum256([]byte(password)), started: time.Now(), sessions: map[string]session{}, attempts: map[string]attempt{}, syncGate: make(chan struct{}, 1), lifetime: ctx, lifetimeCancel: cancel,
 		classrooms: make(map[string]*classroomWatch), openClassroom: defaultOpenClassroom, analysisGate: make(chan struct{}, 1), analyzeProblem: defaultAnalyzeProblem,
-		startZhidao: defaultZhidaoFlow, newZhidao: func(session string) rainAdapter { return platform.NewZhidao(session) }, startRain: defaultRainFlow, newRain: func(cookie string) rainAdapter { return platform.NewRain(cookie) }, sendBark: bark.Send,
+		startZhidao: defaultZhidaoFlow, newZhidao: func(session string) rainAdapter { return platform.NewZhidao(session) }, startRain: defaultRainFlow, newRain: func(cookie string) rainAdapter { return platform.NewRain(cookie) }, sendBark: func(ctx context.Context, server, key, title, body string, opts bark.Options) error {
+			return bark.SendWithOptions(ctx, server, key, title, body, opts)
+		},
 		smsSource: newSMSSourceFromEnv(), passwordLogin: platform.PasswordLogin, slideLogin: platform.SlideLogin}, nil
 }
 
@@ -460,7 +462,7 @@ func (s *Server) testBark(w http.ResponseWriter, r *http.Request) {
 	s.notifyMu.Lock()
 	defer s.notifyMu.Unlock()
 	c := s.Vault.Get()
-	err := s.sendBark(r.Context(), c.BarkURL, c.BarkKey, "DueRadar 测试通知", "提醒服务已连接，学习任务将按你的规则通知。")
+	err := s.sendBark(r.Context(), c.BarkURL, c.BarkKey, "DueRadar 测试通知", "提醒服务已连接，学习任务将按你的规则通知。", bark.Options{})
 	now := time.Now()
 	s.mu.Lock()
 	s.lastTestAt = &now
@@ -687,7 +689,11 @@ func (s *Server) deliverWithGuard(ctx context.Context, valid func() bool) {
 			}
 			continue
 		}
-		err = s.sendBark(ctx, c.BarkURL, c.BarkKey, event.Title, event.Body)
+		opts := bark.Options{}
+		if event.Category == "poll" && s.Engine.Settings().PollWakeEnabled {
+			opts = bark.Wake()
+		}
+		err = s.sendBark(ctx, c.BarkURL, c.BarkKey, event.Title, event.Body, opts)
 		s.deliveryResult = &deliveryOutcome{claim: event, sent: err == nil, at: time.Now()}
 		if persistErr := s.persistDelivery(); persistErr != nil {
 			s.setDeliveryError("通知结果保存失败，发送已暂停；请检查数据目录")

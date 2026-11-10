@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethandong16/due-radar/internal/bark"
 	"github.com/ethandong16/due-radar/internal/core"
 	"github.com/ethandong16/due-radar/internal/platform"
 	"github.com/ethandong16/due-radar/internal/vault"
@@ -68,7 +69,7 @@ func prepareClassroom(t *testing.T, s *Server, fallback, analysis bool, channel 
 		lesson: platform.LiveLesson{LessonID: "10", ClassroomID: "100", CourseName: "Fixture course", Role: 5},
 		ctx:    ctx, cancel: cancel, adapter: fakeRainAdapter{}, channel: channel, problems: map[string]platform.ClassroomProblem{p.ID: p}, fallbacks: map[string]bool{}, changed: make(chan struct{})}
 	s.classrooms[w.lesson.LessonID] = w
-	s.sendBark = func(context.Context, string, string, string, string) error {
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 		t.Error("unexpected real notification path")
 		return errors.New("fixture")
 	}
@@ -262,7 +263,7 @@ func TestClassroomAnalysisImmediateOnceAndNeverSubmitsModelAnswer(t *testing.T) 
 		}
 		return "A: fixture reason", nil
 	}
-	s.sendBark = func(_ context.Context, _, _, title, body string) error {
+	s.sendBark = func(_ context.Context, _, _, title, body string, _ bark.Options) error {
 		if !strings.Contains(title, "AI 参考答案") || !strings.Contains(body, "不会自动提交模型答案") {
 			t.Error("missing reference-only notice")
 		}
@@ -291,7 +292,7 @@ func TestClassroomTimelineProblemNotifiesWithoutSlideOptions(t *testing.T) {
 	var pushes atomic.Int32
 	var mu sync.Mutex
 	var gotTitle, gotBody string
-	s.sendBark = func(_ context.Context, _, _, title, body string) error {
+	s.sendBark = func(_ context.Context, _, _, title, body string, _ bark.Options) error {
 		mu.Lock()
 		gotTitle, gotBody = title, body
 		mu.Unlock()
@@ -327,7 +328,7 @@ func TestClassroomPollNotifiesWithoutAnswerPath(t *testing.T) {
 	var pushes atomic.Int32
 	var mu sync.Mutex
 	var gotTitle, gotBody string
-	s.sendBark = func(_ context.Context, _, _, title, body string) error {
+	s.sendBark = func(_ context.Context, _, _, title, body string, _ bark.Options) error {
 		mu.Lock()
 		gotTitle, gotBody = title, body
 		mu.Unlock()
@@ -372,7 +373,7 @@ func TestClassroomStaleAnalysisCannotNotify(t *testing.T) {
 				return "A", nil
 			}
 			var pushes atomic.Int32
-			s.sendBark = func(context.Context, string, string, string, string) error { pushes.Add(1); return nil }
+			s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { pushes.Add(1); return nil }
 			s.startJob(func(context.Context) { defer close(done); s.runAnalysis(w, serverClassroomProblem()) })
 			await(t, entered)
 			if mode == "model change" {

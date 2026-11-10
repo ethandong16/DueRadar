@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethandong16/due-radar/internal/bark"
 	"github.com/ethandong16/due-radar/internal/core"
 	"github.com/ethandong16/due-radar/internal/platform"
 	"github.com/ethandong16/due-radar/internal/vault"
@@ -86,7 +87,7 @@ func TestRebindFencesInFlightDelivery(t *testing.T) {
 			var once sync.Once
 			releaseSend := func() { once.Do(func() { close(release) }) }
 			defer releaseSend()
-			s.sendBark = func(context.Context, string, string, string, string) error {
+			s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 				close(started)
 				<-release
 				if !sent {

@@ -16,6 +16,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/ethandong16/due-radar/internal/bark"
 	"github.com/ethandong16/due-radar/internal/core"
 	"github.com/ethandong16/due-radar/internal/vault"
 )
@@ -426,7 +427,7 @@ func TestMultiTenantDataIsolation(t *testing.T) {
 			t.Fatal(err)
 		}
 		called := false
-		tc.worker.sendBark = func(_ context.Context, server, key, _, _ string) error {
+		tc.worker.sendBark = func(_ context.Context, server, key, _, _ string, _ bark.Options) error {
 			called = true
 			if server != tc.server || key != tc.key {
 				return errors.New("wrong account notification configuration")

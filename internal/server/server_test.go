@@ -16,6 +16,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/ethandong16/due-radar/internal/bark"
 	"github.com/ethandong16/due-radar/internal/core"
 	"github.com/ethandong16/due-radar/internal/vault"
 )
@@ -141,7 +142,7 @@ func TestBarkTestDoesNotExposeTransportError(t *testing.T) {
 		t.Fatal(err)
 	}
 	const secret = "https://api.day.app/push?device_key=private-test-key"
-	s.sendBark = func(context.Context, string, string, string, string) error {
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 		return errors.New(secret)
 	}
 	if w := request(h, "POST", "/api/bark/test", "", c, ""); w.Code != 502 {

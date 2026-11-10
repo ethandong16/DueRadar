@@ -63,6 +63,9 @@ func TestReportInClassLabelsPollWithoutChangingDelivery(t *testing.T) {
 	if len(pending) != 1 || pending[0].Kind != "in_class" || pending[0].Title != "课上投票 · 你支持哪种解法？" {
 		t.Fatalf("unexpected poll event %+v", pending)
 	}
+	if pending[0].Category != "poll" {
+		t.Fatalf("poll category not recorded: %+v", pending[0])
+	}
 	// A poll is urgent for delivery purposes, like a quiz, but the category is
 	// presentation-only: it never carries an answer or submission instruction.
 	if !strings.Contains(pending[0].Body, "离散数学") {

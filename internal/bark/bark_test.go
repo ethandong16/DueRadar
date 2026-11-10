@@ -2,6 +2,7 @@ package bark
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -39,6 +40,39 @@ func TestRejectRedirectWithoutForwardingSecret(t *testing.T) {
 	}
 	if hits != 0 {
 		t.Fatal("key forwarded through redirect")
+	}
+}
+
+func TestWakeOptionsAreSent(t *testing.T) {
+	var payload map[string]any
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		w.Write([]byte(`{"code":200}`))
+	}))
+	defer srv.Close()
+	old := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	defer func() { http.DefaultTransport = old }()
+	if err := SendWithOptions(context.Background(), srv.URL, "key", "title", "body", Wake()); err != nil {
+		t.Fatal(err)
+	}
+	if payload["level"] != "critical" || payload["volume"] != float64(10) || payload["call"] != float64(1) {
+		t.Fatalf("wake payload=%v", payload)
+	}
+	if payload["device_key"] != "key" || payload["title"] != "title" || payload["body"] != "body" || payload["group"] != "DueRadar" {
+		t.Fatalf("base payload=%v", payload)
+	}
+	// Ordinary reminders must stay exactly as quiet as before.
+	payload = nil
+	if err := Send(context.Background(), srv.URL, "key", "title", "body"); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"level", "volume", "call", "sound"} {
+		if _, present := payload[key]; present {
+			t.Fatalf("ordinary send included %q: %v", key, payload)
+		}
 	}
 }
 

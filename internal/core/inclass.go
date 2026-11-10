@@ -104,6 +104,7 @@ func (e *Engine) ReportInClass(platform string, items []InClassQuiz, now time.Ti
 				ID:        eventID(platform, "in_class", item.ClassroomID, item.ActivityID),
 				Platform:  platform,
 				Kind:      "in_class",
+				Category:  item.Category,
 				Title:     "课上" + category + " · " + item.Title,
 				Body:      strings.TrimSpace(item.Body),
 				DueAt:     now,

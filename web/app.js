@@ -2,7 +2,7 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const defaults = { deadline_minutes: [1440, 180, 30], exam_start_minutes: [1440, 60], video_minutes: [4320, 1440, 180], quiet_enabled: true, quiet_start: "23:00", quiet_end: "08:00", timezone: "Asia/Shanghai", in_class_enabled: true, in_class_poll_seconds: 20, zhidao_in_class_enabled: true, rain_fallback_enabled: false, rain_analysis_enabled: false };
+  const defaults = { deadline_minutes: [1440, 180, 30], exam_start_minutes: [1440, 60], video_minutes: [4320, 1440, 180], quiet_enabled: true, quiet_start: "23:00", quiet_end: "08:00", timezone: "Asia/Shanghai", in_class_enabled: true, in_class_poll_seconds: 20, zhidao_in_class_enabled: true, poll_wake_enabled: false, rain_fallback_enabled: false, rain_analysis_enabled: false };
   const viewNames = { tasks: "任务总览", accounts: "平台账号", settings: "通知设置", activity: "运行记录" };
   const kindNames = { homework: "作业", exam: "考试", chapter: "章节测试", video: "视频学习" };
   const taskStatus = { pending: ["待完成", "warning"], completed: ["已完成", "success"], unknown: ["状态未知", "neutral"] };
@@ -464,6 +464,7 @@
     $("in-class-enabled").checked = settings.in_class_enabled !== false;
     $("in-class-poll").value = settings.in_class_poll_seconds || defaults.in_class_poll_seconds;
     $("zhidao-in-class-enabled").checked = settings.zhidao_in_class_enabled === true;
+    $("poll-wake-enabled").checked = settings.poll_wake_enabled === true;
     $("rain-fallback-enabled").checked = Boolean(settings.rain_fallback_enabled);
     $("rain-analysis-enabled").checked = Boolean(settings.rain_analysis_enabled);
   }
@@ -831,7 +832,7 @@
       if (!state?.settings || !state?.runtime) throw new Error("请等待提醒设置及运行状态加载完成后再保存。");
       const pollSeconds = Number.parseInt($("in-class-poll").value, 10);
       if (!Number.isInteger(pollSeconds) || pollSeconds < 10 || pollSeconds > 300) throw new Error("课上互动检查间隔请填写 10—300 秒。");
-      const settings = { deadline_minutes: parseMinutes("deadline-minutes", "截止提醒"), exam_start_minutes: parseMinutes("exam-minutes", "考试开始"), video_minutes: parseMinutes("video-minutes", "视频截止"), quiet_enabled: $("quiet-enabled").checked, quiet_start: $("quiet-start").value, quiet_end: $("quiet-end").value, timezone: $("timezone").value.trim(), in_class_enabled: $("in-class-enabled").checked, in_class_poll_seconds: pollSeconds, zhidao_in_class_enabled: $("zhidao-in-class-enabled").checked, rain_fallback_enabled: $("rain-fallback-enabled").checked, rain_analysis_enabled: $("rain-analysis-enabled").checked, zhidao_auto_login: Boolean(state.settings?.zhidao_auto_login) };
+      const settings = { deadline_minutes: parseMinutes("deadline-minutes", "截止提醒"), exam_start_minutes: parseMinutes("exam-minutes", "考试开始"), video_minutes: parseMinutes("video-minutes", "视频截止"), quiet_enabled: $("quiet-enabled").checked, quiet_start: $("quiet-start").value, quiet_end: $("quiet-end").value, timezone: $("timezone").value.trim(), in_class_enabled: $("in-class-enabled").checked, in_class_poll_seconds: pollSeconds, zhidao_in_class_enabled: $("zhidao-in-class-enabled").checked, poll_wake_enabled: $("poll-wake-enabled").checked, rain_fallback_enabled: $("rain-fallback-enabled").checked, rain_analysis_enabled: $("rain-analysis-enabled").checked, zhidao_auto_login: Boolean(state.settings?.zhidao_auto_login) };
       try { new Intl.DateTimeFormat("zh-CN", { timeZone: settings.timezone }); } catch { throw new Error("请填写有效的 IANA 时区，例如 Asia/Shanghai。"); }
       if (settings.quiet_enabled && settings.quiet_start === settings.quiet_end) throw new Error("静默开始和结束时间应不同；全天接收提醒可关闭静默时段。");
       await api("/api/settings", "PUT", settings); settingsDirty = false; if (await refreshState()) notify("提醒规则已保存。");

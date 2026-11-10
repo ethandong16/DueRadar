@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethandong16/due-radar/internal/bark"
 	"github.com/ethandong16/due-radar/internal/core"
 	"github.com/ethandong16/due-radar/internal/platform"
 	"github.com/ethandong16/due-radar/internal/vault"
@@ -55,7 +56,7 @@ func prepareInClass(t *testing.T, s *Server, live fakeLiveRain, now time.Time) *
 		t.Fatal(err)
 	}
 	sent := []string{}
-	s.sendBark = func(_ context.Context, _, _, title, _ string) error {
+	s.sendBark = func(_ context.Context, _, _, title, _ string, _ bark.Options) error {
 		sent = append(sent, title)
 		return nil
 	}
@@ -241,7 +242,7 @@ func TestInClassTestEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := 0
-	s.sendBark = func(_ context.Context, _, _, title, body string) error {
+	s.sendBark = func(_ context.Context, _, _, title, body string, _ bark.Options) error {
 		sent++
 		if !strings.HasPrefix(title, "课上答题 · ") || !strings.Contains(body, "链路") {
 			t.Fatalf("unexpected payload %q %q", title, body)
@@ -257,6 +258,47 @@ func TestInClassTestEndpoint(t *testing.T) {
 	events := s.Engine.Snapshot().Events
 	if len(events) != 1 || events[0].Kind != "in_class" || events[0].Status != "sent" {
 		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestPollWakeUsesCriticalBarkOptions(t *testing.T) {
+	s, _ := testApp(t)
+	if err := s.Vault.Update(func(c *vault.Config) error {
+		c.BarkURL, c.BarkKey = "https://api.day.app", "test-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settings := s.Engine.Snapshot().Settings
+	settings.PollWakeEnabled = true
+	if err := s.Engine.UpdateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Engine.Sync(core.PlatformZhidaoCampus, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	sent := map[string]bark.Options{}
+	s.sendBark = func(_ context.Context, _, _, title, _ string, opts bark.Options) error {
+		sent[title] = opts
+		return nil
+	}
+	now := time.Now()
+	items := []core.InClassQuiz{
+		{ClassroomID: "123", ActivityID: "vote:1", Course: "概统", Title: "投票", Body: "投票", Notify: true, Category: "poll"},
+		{ClassroomID: "123", ActivityID: "quiz:1", Course: "概统", Title: "习题", Body: "习题", Notify: true},
+	}
+	if _, err := s.Engine.ReportInClass(core.PlatformZhidaoCampus, items, now); err != nil {
+		t.Fatal(err)
+	}
+	s.Deliver(context.Background())
+	if len(sent) != 2 {
+		t.Fatalf("sent=%v", sent)
+	}
+	if got := sent["课上投票 · 投票"]; got != bark.Wake() {
+		t.Fatalf("poll options=%+v", got)
+	}
+	if got := sent["课上答题 · 习题"]; got != (bark.Options{}) {
+		t.Fatalf("quiz options=%+v", got)
 	}
 }
 
@@ -350,7 +392,7 @@ func TestCheckInClassRejectsSupersededPoll(t *testing.T) {
 						return "latest-renewal", nil
 					}}
 				}
-				s.sendBark = func(context.Context, string, string, string, string) error { sends.Add(1); return nil }
+				s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { sends.Add(1); return nil }
 				go func() { defer close(done); s.checkInClass(ctx) }()
 				await(t, entered)
 				switch reason {
@@ -431,7 +473,7 @@ func TestCheckInClassDoesNotPublishPartialAfterReenable(t *testing.T) {
 	readDone, continueRead := make(chan struct{}), make(chan struct{})
 	exportStarted, continueExport, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var sends, quickCalls atomic.Int32
-	s.sendBark = func(context.Context, string, string, string, string) error { sends.Add(1); return nil }
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { sends.Add(1); return nil }
 	live := fakeLiveRain{
 		lessons: func(context.Context) ([]platform.LiveLesson, error) {
 			return []platform.LiveLesson{{ClassroomID: "1", LessonID: "2", CourseName: "Test"}}, nil
@@ -618,7 +660,7 @@ func TestCheckInClassRebindThroughLogin(t *testing.T) {
 			}
 			prepareInClass(t, s, live, now)
 			var sends atomic.Int32
-			s.sendBark = func(context.Context, string, string, string, string) error { sends.Add(1); return nil }
+			s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { sends.Add(1); return nil }
 			var adapters atomic.Int32
 			s.newRain = func(string) rainAdapter {
 				if adapters.Add(1) == 1 {
@@ -684,7 +726,7 @@ func TestCheckInClassRevalidatesQueuedImmediateDelivery(t *testing.T) {
 			}
 			prepareInClass(t, s, live, now)
 			var sends atomic.Int32
-			s.sendBark = func(context.Context, string, string, string, string) error { sends.Add(1); return nil }
+			s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { sends.Add(1); return nil }
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan struct{})
@@ -754,7 +796,7 @@ func TestCheckInClassRevalidatesBetweenTransports(t *testing.T) {
 			defer cancel()
 			entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			var sends atomic.Int32
-			s.sendBark = func(context.Context, string, string, string, string) error {
+			s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 				if sends.Add(1) == 1 {
 					close(entered)
 					<-release

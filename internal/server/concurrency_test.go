@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethandong16/due-radar/internal/bark"
 	"github.com/ethandong16/due-radar/internal/core"
 	"github.com/ethandong16/due-radar/internal/platform"
 	"github.com/ethandong16/due-radar/internal/vault"
@@ -436,7 +437,7 @@ func TestDeliveredOutcomeRetriesPersistenceBeforeAnotherPush(t *testing.T) {
 	s, dir := deliveryApp(t)
 	sends := 0
 	var restore func()
-	s.sendBark = func(context.Context, string, string, string, string) error {
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 		sends++
 		if sends == 1 {
 			restore = blockStateDirectory(t, dir)
@@ -475,7 +476,7 @@ func TestDeliveredOutcomeRetriesPersistenceBeforeAnotherPush(t *testing.T) {
 func TestClaimPersistenceFailureDoesNotSend(t *testing.T) {
 	s, dir := deliveryApp(t)
 	sends := 0
-	s.sendBark = func(context.Context, string, string, string, string) error { sends++; return nil }
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { sends++; return nil }
 	restore := blockStateDirectory(t, dir)
 	s.Deliver(context.Background())
 	if sends != 0 {
@@ -497,7 +498,7 @@ func TestClaimPersistenceFailureDoesNotSend(t *testing.T) {
 func TestCompletionDuringPushStillRecordsActualDelivery(t *testing.T) {
 	s, _ := deliveryApp(t)
 	sends := 0
-	s.sendBark = func(context.Context, string, string, string, string) error {
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 		sends++
 		tasks := s.Engine.Snapshot().Tasks
 		for i := range tasks {

@@ -45,7 +45,7 @@ function browser(intercept = null) {
     return elements.get(id);
   }
   for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all";
-  $("settings-form").inputs = ["deadline-minutes", "exam-minutes", "video-minutes", "quiet-enabled", "quiet-start", "quiet-end", "timezone", "in-class-enabled", "in-class-poll", "zhidao-in-class-enabled", "rain-fallback-enabled", "rain-analysis-enabled"].map($);
+  $("settings-form").inputs = ["deadline-minutes", "exam-minutes", "video-minutes", "quiet-enabled", "quiet-start", "quiet-end", "timezone", "in-class-enabled", "in-class-poll", "zhidao-in-class-enabled", "poll-wake-enabled", "rain-fallback-enabled", "rain-analysis-enabled"].map($);
   $("analysis-form").inputs = ["analysis-key", "analysis-model"].map($);
   let interval;
   let loggedIn = true;
@@ -429,17 +429,21 @@ test("classroom assistants default off and save independent opt-ins", async () =
   assert.equal(page.$("rain-fallback-enabled").checked, false);
   assert.equal(page.$("rain-analysis-enabled").checked, false);
   assert.equal(page.$("zhidao-in-class-enabled").checked, true);
+  assert.equal(page.$("poll-wake-enabled").checked, false);
   page.$("rain-fallback-enabled").checked = true;
+  page.$("poll-wake-enabled").checked = true;
   page.$("settings-form").emit("input");
   await page.submit("settings-form");
   await settle();
   const saved = page.calls.find(call => call.url === "/api/settings" && call.method === "PUT");
   assert.equal(saved.body.rain_fallback_enabled, true);
   assert.equal(saved.body.rain_analysis_enabled, false);
+  assert.equal(saved.body.poll_wake_enabled, true);
   await page.click("settings-defaults");
   assert.equal(page.$("rain-fallback-enabled").checked, false);
   assert.equal(page.$("rain-analysis-enabled").checked, false);
   assert.equal(page.$("zhidao-in-class-enabled").checked, true);
+  assert.equal(page.$("poll-wake-enabled").checked, false);
 });
 
 test("background refresh preserves an unsaved model and key", async () => {

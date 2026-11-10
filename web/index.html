@@ -406,6 +406,11 @@
                   <label for="in-class-poll">检查间隔（秒）</label>
                   <input id="in-class-poll" type="number" min="10" max="300" step="5" inputmode="numeric" aria-describedby="in-class-hint">
                   <p class="field-hint" id="in-class-hint">10—300 秒，仅在上课期间检查。</p>
+                  <label class="switch-label" for="poll-wake-enabled">
+                    <span><strong>投票强提醒（睡眠叫醒）</strong><small>投票通知改用 Bark 关键提醒、最大音量并重复响铃；需在 Bark App 中允许关键提醒。普通任务提醒不受影响。</small></span>
+                    <input id="poll-wake-enabled" type="checkbox" role="switch" aria-describedby="poll-wake-hint">
+                  </label>
+                  <p class="field-hint" id="poll-wake-hint">静默时段和手机静音都不能阻止关键提醒；未授予 Bark 关键提醒权限时会退化为普通通知。</p>
                   <div class="form-actions">
                     <button id="in-class-test" class="button secondary" type="button">发送课上答题测试</button>
                     <button id="in-class-test-poll" class="button secondary" type="button">发送投票提醒测试</button>

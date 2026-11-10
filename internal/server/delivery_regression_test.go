@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethandong16/due-radar/internal/bark"
 	"github.com/ethandong16/due-radar/internal/core"
 	"github.com/ethandong16/due-radar/internal/vault"
 )
@@ -38,7 +39,7 @@ func TestNotificationHealthClearsWhenLastFailureBecomesIrrelevant(t *testing.T) 
 			t.Run(outcome+"/"+resolution, func(t *testing.T) {
 				s, _ := deliveryApp(t)
 				calls := 0
-				s.sendBark = func(context.Context, string, string, string, string) error {
+				s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 					calls++
 					if outcome == "last-failed" && calls == 1 {
 						return nil
@@ -98,7 +99,7 @@ func TestNotificationHealthClearsAfterReminderRuleRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls, failed := 0, 0
-	s.sendBark = func(_ context.Context, _, _, title, _ string) error {
+	s.sendBark = func(_ context.Context, _, _, title, _ string, _ bark.Options) error {
 		calls++
 		if strings.HasPrefix(title, "任务即将截止") {
 			failed++
@@ -135,7 +136,7 @@ func TestNotificationHealthPreservesUnpersistedOutcomeAfterCompletion(t *testing
 					restore()
 				}
 			})
-			s.sendBark = func(context.Context, string, string, string, string) error {
+			s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 				calls++
 				tasks := s.Engine.Snapshot().Tasks
 				for i := range tasks {
@@ -174,7 +175,7 @@ func TestNotificationHealthSurvivesRestartAndMixedBatch(t *testing.T) {
 		t.Run(map[bool]string{false: "mixed-batch", true: "restart"}[restart], func(t *testing.T) {
 			s, dir := deliveryApp(t)
 			calls := 0
-			s.sendBark = func(context.Context, string, string, string, string) error {
+			s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 				calls++
 				if calls == 1 {
 					return errors.New("private-provider-error")
@@ -234,7 +235,7 @@ func TestNotificationHealthSurvivesRestartAndMixedBatch(t *testing.T) {
 func TestCanceledDeliveryPreservesRetryBudgetAcrossRestarts(t *testing.T) {
 	s, dir := deliveryApp(t)
 	sends := 0
-	s.sendBark = func(context.Context, string, string, string, string) error { sends++; return nil }
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { sends++; return nil }
 	for round := 0; round < core.MaxDeliveryAttempts; round++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -266,7 +267,7 @@ func TestDeliveryRechecksBeforeClaimingNextEvent(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			sends := 0
-			s.sendBark = func(context.Context, string, string, string, string) error {
+			s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 				sends++
 				switch scenario {
 				case "cancellation":
@@ -311,7 +312,7 @@ func TestDeliveryRechecksBeforeClaimingNextEvent(t *testing.T) {
 func TestDeliveryFailureHealthSurvivesIdleAndStorageRecovery(t *testing.T) {
 	s, dir := deliveryApp(t)
 	sends := 0
-	s.sendBark = func(context.Context, string, string, string, string) error {
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error {
 		sends++
 		return errors.New("private-fixture-provider-error")
 	}
@@ -339,7 +340,7 @@ func TestDeliveryFailureHealthSurvivesIdleAndStorageRecovery(t *testing.T) {
 		t.Fatal("storage failure did not take precedence")
 	}
 	restore()
-	s.sendBark = func(context.Context, string, string, string, string) error { sends++; return nil }
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { sends++; return nil }
 	s.Deliver(context.Background())
 	status = readNotificationHealth(t, s)
 	if status.Error == "" || strings.Contains(status.Error, "保存失败") || status.Failures != 2 || status.LastSuccess == nil || sends != 3 {
@@ -350,7 +351,7 @@ func TestDeliveryFailureHealthSurvivesIdleAndStorageRecovery(t *testing.T) {
 func TestDeliveryRefreshesBarkConfigurationBetweenEvents(t *testing.T) {
 	s, _ := deliveryApp(t)
 	keys := []string{}
-	s.sendBark = func(_ context.Context, _, key, _, _ string) error {
+	s.sendBark = func(_ context.Context, _, key, _, _ string, _ bark.Options) error {
 		keys = append(keys, key)
 		return s.Vault.Update(func(c *vault.Config) error { c.BarkKey = "rotated-key"; return nil })
 	}
@@ -368,7 +369,7 @@ func TestUnsentReturnRetriesPersistenceBeforeNetwork(t *testing.T) {
 	}
 	s.deliveryResult = &deliveryOutcome{unsent: &claims[0]}
 	sends := 0
-	s.sendBark = func(context.Context, string, string, string, string) error { sends++; return nil }
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { sends++; return nil }
 	restore := blockStateDirectory(t, dir)
 	s.Deliver(context.Background())
 	if sends != 0 || s.deliveryResult == nil {

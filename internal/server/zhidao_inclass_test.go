@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethandong16/due-radar/internal/bark"
 	"github.com/ethandong16/due-radar/internal/core"
 	"github.com/ethandong16/due-radar/internal/platform"
 	"github.com/ethandong16/due-radar/internal/vault"
@@ -107,7 +108,7 @@ func TestZhidaoInClassBaselineNewVoteAndDedup(t *testing.T) {
 	var mu sync.Mutex
 	var pushes int
 	var titles, bodies []string
-	s.sendBark = func(_ context.Context, _, _, title, body string) error {
+	s.sendBark = func(_ context.Context, _, _, title, body string, _ bark.Options) error {
 		mu.Lock()
 		defer mu.Unlock()
 		pushes++
@@ -177,7 +178,7 @@ func TestZhidaoInClassParticipatedVoteStaysSilent(t *testing.T) {
 	}
 	prepareZhidaoInClass(t, s, true, fake)
 	var pushes atomic.Int32
-	s.sendBark = func(context.Context, string, string, string, string) error { pushes.Add(1); return nil }
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { pushes.Add(1); return nil }
 	s.checkZhidaoInClass(context.Background())
 	if pushes.Load() != 0 {
 		t.Fatal("already-answered vote notified")
@@ -204,7 +205,7 @@ func TestZhidaoInClassEndedVoteStaysSilent(t *testing.T) {
 	}
 	prepareZhidaoInClass(t, s, true, fake)
 	var pushes atomic.Int32
-	s.sendBark = func(context.Context, string, string, string, string) error { pushes.Add(1); return nil }
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { pushes.Add(1); return nil }
 	s.checkZhidaoInClass(context.Background())
 	if pushes.Load() != 0 {
 		t.Fatal("ended vote notified")
@@ -227,7 +228,7 @@ func TestZhidaoInClassFailureDoesNotEstablishBaseline(t *testing.T) {
 	}
 	prepareZhidaoInClass(t, s, true, fake)
 	var pushes atomic.Int32
-	s.sendBark = func(context.Context, string, string, string, string) error { pushes.Add(1); return nil }
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { pushes.Add(1); return nil }
 	s.checkZhidaoInClass(context.Background())
 	if pushes.Load() != 0 || s.zhidaoClassroomIsBaseline("123") {
 		t.Fatal("failed snapshot established a baseline")
@@ -258,7 +259,7 @@ func TestZhidaoInClassGenerationChangeDiscardsObservation(t *testing.T) {
 	}}
 	prepareZhidaoInClass(t, s, true, fake)
 	var pushes atomic.Int32
-	s.sendBark = func(context.Context, string, string, string, string) error { pushes.Add(1); return nil }
+	s.sendBark = func(context.Context, string, string, string, string, bark.Options) error { pushes.Add(1); return nil }
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
