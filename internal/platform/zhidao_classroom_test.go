@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func zhidaoPollClient(t *testing.T, handler func(*http.Request) (*http.Response, error)) *Zhidao {
@@ -44,11 +45,11 @@ func TestZhidaoLivePollsUseOnlyReadOnlyEndpoints(t *testing.T) {
 				t.Errorf("live list method %s", r.Method)
 			}
 			return zhsResponse(r, 200, `{"code":200,"data":[
-				{"lessonId":"123","courseId":"course-1","term":20271,"courseName":"概率与统计"},
+				{"lessonId":"a1B2c3D4e5","courseId":"course-1","term":20271,"courseName":"概率与统计"},
 				{"lessonId":"124","courseId":"course-2","term":20271,"courseName":"已结束课程"}
 			]}`, nil), nil
 		case "/student-app/interaction/api/lesson/check/finish":
-			if r.URL.Query().Get("lessonId") == "123" && r.URL.Query().Get("courseId") == "course-1" && r.URL.Query().Get("term") == "20271" {
+			if r.URL.Query().Get("lessonId") == "a1B2c3D4e5" && r.URL.Query().Get("courseId") == "course-1" && r.URL.Query().Get("term") == "20271" {
 				return zhsResponse(r, 200, `{"code":200,"data":false}`, nil), nil
 			}
 			if r.URL.Query().Get("lessonId") == "124" {
@@ -64,11 +65,12 @@ func TestZhidaoLivePollsUseOnlyReadOnlyEndpoints(t *testing.T) {
 				t.Error(err)
 			}
 			return zhsResponse(r, 200, `{"code":200,"data":[
-				{"signalCode":"IN_CLASS::TOOL-TEST::PUBLISH","message":"{\"signal\":{\"signalCode\":\"IN_CLASS::TOOL-VOTE::PUBLISH\",\"content\":{\"bizId\":9001}}}","bizObj":{"title":"你支持哪种解法？"},"createTime":"1700000000000"},
+				{"signalCode":"IN_CLASS::TOOL-TEST::PUBLISH","message":"{\"msgTime\":1700000005,\"signal\":{\"signalCode\":\"IN_CLASS::TOOL-VOTE::PUBLISH\",\"content\":{\"bizId\":9001}}}","bizObj":{"title":"你支持哪种解法？"},"createTime":"1700000000000"},
 				{"signalCode":"IN_CLASS::TOOL-NOTICE::PUBLISH","message":"not-json"},
 				{"signalCode":"IN_CLASS::TOOL-VOTE::PUBLISH","message":{"signal":{"content":{"voteId":"9002"}},"title":"匿名投票"},"bizObj":{"title":"匿名投票"},"createTime":1700000001000},
 				{"signalCode":"IN_CLASS::TOOL-VOTE::PUBLISH","message":"{\"signal\":{\"content\":{\"bizId\":9001}}}","bizObj":{"title":"重复"}},
-				{"signalCode":"IN_CLASS::TOOL-VOTE::PUBLISH","message":"{\"signal\":{\"content\":{\"bizId\":9003}}}","bizObj":{"title":"无时间戳"},"createTime":"2026-11-10 10:00:00"}
+				{"signalCode":"IN_CLASS::TOOL-VOTE::PUBLISH","message":"{\"signal\":{\"content\":{\"bizId\":9003}}}","bizObj":{"title":"口述投票"},"createTime":"2026-11-10 10:00:00"},
+				{"signalCode":"IN_CLASS::TOOL-VOTE::PUBLISH","message":"{\"signal\":{\"content\":{\"bizId\":9004}}}","bizObj":{"title":"未知时间"},"createTime":"not-a-time"}
 			]}`, nil), nil
 		case "/student-app/api/vote/getVoteDetail":
 			if r.URL.Query().Get("voteId") != "9001" || r.URL.Query().Get("courseId") != "course-1" || r.URL.Query().Get("term") != "20271" {
@@ -76,7 +78,8 @@ func TestZhidaoLivePollsUseOnlyReadOnlyEndpoints(t *testing.T) {
 			}
 			return zhsResponse(r, 200, `{"code":200,"data":{"voteId":9001,"title":"你支持哪种解法？","isAnonymous":true,"isFinish":0,"checkType":"single","options":[
 				{"voteOptionId":1,"optionContent":" 赞成 ","selectedStudents":[{"studentId":"classmate"}]},
-				{"voteOptionId":2,"optionContent":"反对"}
+				{"voteOptionId":2,"optionContent":"反对"},
+				{"voteOptionId":3,"optionCode":"C","optionContent":null}
 			]}}`, nil), nil
 		default:
 			t.Fatalf("unexpected endpoint %s", r.URL.Path)
@@ -85,24 +88,28 @@ func TestZhidaoLivePollsUseOnlyReadOnlyEndpoints(t *testing.T) {
 	})
 
 	lessons, err := z.LivePollLessons(context.Background())
-	if err != nil || len(lessons) != 1 || lessons[0].LessonID != "123" || lessons[0].Course != "概率与统计" || lessons[0].Term != 20271 {
+	if err != nil || len(lessons) != 1 || lessons[0].LessonID != "a1B2c3D4e5" || lessons[0].Course != "概率与统计" || lessons[0].Term != 20271 {
 		t.Fatalf("lessons=%+v err=%v", lessons, err)
 	}
 	signals, err := z.LivePollSignals(context.Background(), lessons[0])
-	if err != nil || len(signals) != 3 {
+	if err != nil || len(signals) != 4 {
 		t.Fatalf("signals=%+v err=%v", signals, err)
 	}
-	if signals[0].ID != "9001" || signals[0].Title != "你支持哪种解法？" || signals[0].CreatedAt.IsZero() {
+	if signals[0].ID != "9001" || signals[0].Title != "你支持哪种解法？" || !signals[0].CreatedAt.Equal(time.Unix(1700000005, 0)) {
 		t.Fatalf("first signal=%+v", signals[0])
 	}
 	if signals[1].ID != "9002" || signals[1].Title != "匿名投票" {
 		t.Fatalf("second signal=%+v", signals[1])
 	}
-	// An unrecognized timestamp is unknown, not a reason to reject the snapshot.
-	if signals[2].ID != "9003" || !signals[2].CreatedAt.IsZero() {
+	// Quick votes carry an A/B/C option list even without optionContent text.
+	if signals[2].ID != "9003" || !signals[2].CreatedAt.Equal(time.Date(2026, 11, 10, 10, 0, 0, 0, zhidaoPollZone)) {
 		t.Fatalf("third signal=%+v", signals[2])
 	}
-	if signalsBody["lessonId"] != "123" || signalsBody["queryType"] != "ALL" || signalsBody["courseId"] != "course-1" || signalsBody["term"] != float64(20271) {
+	// An unrecognized timestamp is unknown, not a reason to reject the snapshot.
+	if signals[3].ID != "9004" || !signals[3].CreatedAt.IsZero() {
+		t.Fatalf("fourth signal=%+v", signals[3])
+	}
+	if signalsBody["lessonId"] != "a1B2c3D4e5" || signalsBody["queryType"] != "ALL" || signalsBody["courseId"] != "course-1" || signalsBody["term"] != float64(20271) {
 		t.Fatalf("waterfall body=%v", signalsBody)
 	}
 	poll, err := z.PollDetail(context.Background(), lessons[0], "9001")
@@ -112,7 +119,7 @@ func TestZhidaoLivePollsUseOnlyReadOnlyEndpoints(t *testing.T) {
 	if poll.ID != "9001" || poll.Title != "你支持哪种解法？" || !poll.Anonymous || !poll.StatusKnown || poll.Finished {
 		t.Fatalf("poll=%+v", poll)
 	}
-	if len(poll.Options) != 2 || poll.Options[0] != "赞成" || poll.Options[1] != "反对" {
+	if len(poll.Options) != 3 || poll.Options[0] != "赞成" || poll.Options[1] != "反对" || poll.Options[2] != "C" {
 		t.Fatalf("options=%v", poll.Options)
 	}
 }

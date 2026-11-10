@@ -81,18 +81,6 @@ func (id *zhidaoIdentifier) UnmarshalJSON(data []byte) error {
 
 func (id zhidaoIdentifier) String() string { return string(id) }
 
-func zhidaoNumericID(value string) bool {
-	if value == "" || len(value) > 40 {
-		return false
-	}
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func zhidaoTextID(value string) bool {
 	if value == "" || len(value) > 64 {
 		return false
@@ -243,7 +231,7 @@ func (z *Zhidao) LivePollLessons(ctx context.Context) ([]ZhidaoPollLesson, error
 	seen := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		lessonID, courseID := row.LessonID.String(), row.CourseID.String()
-		if !zhidaoNumericID(lessonID) || !zhidaoTextID(courseID) || row.Term <= 0 {
+		if !zhidaoTextID(lessonID) || !zhidaoTextID(courseID) || row.Term <= 0 {
 			return nil, errors.New("知到课堂标识不完整")
 		}
 		if seen[lessonID] {
@@ -280,7 +268,7 @@ func (z *Zhidao) LivePollLessons(ctx context.Context) ([]ZhidaoPollLesson, error
 // publish signals. Rows of other interaction types are ignored. A malformed
 // vote publish row invalidates the snapshot instead of being dropped silently.
 func (z *Zhidao) LivePollSignals(ctx context.Context, lesson ZhidaoPollLesson) ([]ZhidaoPollSignal, error) {
-	if !zhidaoNumericID(lesson.LessonID) || !zhidaoTextID(lesson.CourseID) || lesson.Term <= 0 {
+	if !zhidaoTextID(lesson.LessonID) || !zhidaoTextID(lesson.CourseID) || lesson.Term <= 0 {
 		return nil, errors.New("知到课堂标识无效")
 	}
 	var env struct {
@@ -314,7 +302,8 @@ func (z *Zhidao) LivePollSignals(ctx context.Context, lesson ZhidaoPollLesson) (
 	for _, row := range rows {
 		signalCode := strings.TrimSpace(row.SignalCode)
 		var message struct {
-			Signal struct {
+			MsgTime json.RawMessage `json:"msgTime"`
+			Signal  struct {
 				SignalCode string          `json:"signalCode"`
 				Content    json.RawMessage `json:"content"`
 			} `json:"signal"`
@@ -355,14 +344,20 @@ func (z *Zhidao) LivePollSignals(ctx context.Context, lesson ZhidaoPollLesson) (
 			}
 		}
 		id := zhidaoStringField(merged, "bizId", "voteId", "id")
-		if !zhidaoNumericID(id) {
+		if !zhidaoTextID(id) {
 			return nil, errors.New("知到投票缺少标识")
 		}
 		if seen[id] {
 			continue
 		}
 		seen[id] = true
-		signals = append(signals, ZhidaoPollSignal{ID: id, Title: strings.TrimSpace(zhidaoStringField(merged, "title", "voteTitle")), CreatedAt: zhidaoFlexTime(row.CreateTime)})
+		createdAt := zhidaoFlexTime(row.CreateTime)
+		// The waterfall also carries the room message time in epoch seconds.
+		// Prefer it because it is unambiguous across platform date formats.
+		if messageTime := zhidaoFlexTime(message.MsgTime); !messageTime.IsZero() {
+			createdAt = messageTime
+		}
+		signals = append(signals, ZhidaoPollSignal{ID: id, Title: strings.TrimSpace(zhidaoStringField(merged, "title", "voteTitle")), CreatedAt: createdAt})
 		if len(signals) > 100 {
 			return nil, errors.New("知到投票数量超限")
 		}
@@ -397,8 +392,9 @@ func zhidaoStringField(values map[string]any, keys ...string) string {
 	return ""
 }
 
-// zhidaoFlexTime accepts the numeric timestamp shapes the client normalizes.
-// An unrecognized timestamp is unknown rather than a reason to reject the whole
+// zhidaoFlexTime accepts the numeric timestamp shapes the client normalizes
+// and the platform's "YYYY-MM-DD HH:MM:SS" wall-clock strings (China time). An
+// unrecognized timestamp is unknown rather than a reason to reject the whole
 // vote snapshot; it only affects the first-snapshot freshness decision.
 func zhidaoFlexTime(raw json.RawMessage) time.Time {
 	text := strings.TrimSpace(string(raw))
@@ -412,12 +408,23 @@ func zhidaoFlexTime(raw json.RawMessage) time.Time {
 		}
 		text = strings.TrimSpace(value)
 	}
-	value, err := strconv.ParseInt(text, 10, 64)
-	if err != nil {
-		return time.Time{}
+	if value, err := strconv.ParseInt(text, 10, 64); err == nil {
+		return zhidaoPollTime(value)
 	}
-	return zhidaoPollTime(value)
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+		if parsed, err := time.ParseInLocation(layout, text, zhidaoPollZone); err == nil {
+			return parsed
+		}
+	}
+	if parsed, err := time.Parse(time.RFC3339, text); err == nil {
+		return parsed
+	}
+	return time.Time{}
 }
+
+// Zhidao is a Chinese platform and reports classroom wall-clock times in CST
+// (UTC+8, no daylight saving).
+var zhidaoPollZone = time.FixedZone("CST", 8*60*60)
 
 func zhidaoPollTime(value int64) time.Time {
 	// The waterfall supplies epoch milliseconds. Accept seconds as a fallback
@@ -435,7 +442,7 @@ func zhidaoPollTime(value int64) time.Time {
 // selectedStudents and other participant fields are not part of the struct, so
 // classmate identities never enter memory through this path.
 func (z *Zhidao) PollDetail(ctx context.Context, lesson ZhidaoPollLesson, voteID string) (ZhidaoPoll, error) {
-	if !zhidaoNumericID(lesson.LessonID) || !zhidaoTextID(lesson.CourseID) || lesson.Term <= 0 || !zhidaoNumericID(voteID) {
+	if !zhidaoTextID(lesson.LessonID) || !zhidaoTextID(lesson.CourseID) || lesson.Term <= 0 || !zhidaoTextID(voteID) {
 		return ZhidaoPoll{}, errors.New("知到投票标识无效")
 	}
 	var env struct {
@@ -457,6 +464,7 @@ func (z *Zhidao) PollDetail(ctx context.Context, lesson ZhidaoPollLesson, voteID
 		IsFinish    json.RawMessage  `json:"isFinish"`
 		Options     []struct {
 			OptionContent string `json:"optionContent"`
+			OptionCode    string `json:"optionCode"`
 		} `json:"options"`
 	}
 	if json.Unmarshal(env.Data, &data) != nil {
@@ -473,6 +481,11 @@ func (z *Zhidao) PollDetail(ctx context.Context, lesson ZhidaoPollLesson, voteID
 	options := make([]string, 0, min(len(data.Options), 8))
 	for _, option := range data.Options {
 		text := strings.TrimSpace(option.OptionContent)
+		// Quick votes are read aloud by the teacher; the API returns a null
+		// optionContent and only an A/B/C code. The code is still a useful label.
+		if text == "" {
+			text = strings.TrimSpace(option.OptionCode)
+		}
 		if text == "" {
 			continue
 		}
