@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"time"
@@ -85,8 +86,42 @@ func (s *Server) inClassLoopInterval() time.Duration {
 // runInClass keeps a light polling loop that only works while a Rain lesson is
 // live. It is deliberately separate from the 15-minute task sync so a quiz can
 // be reported within seconds without increasing full synchronizations.
+// pollDelay spreads polling across accounts. Without jitter, every tenant on a
+// multi-user instance hits the same platform on the same second all day.
+func pollDelay(base time.Duration) time.Duration {
+	if base <= 0 {
+		return base
+	}
+	spread := base / 10
+	if spread <= 0 {
+		return base
+	}
+	return base + time.Duration(rand.Int64N(int64(2*spread)+1)) - spread
+}
+
+// classroomPollDelay backs off repeated failed classroom polls. A platform that
+// keeps erroring should not be hit every few seconds; each consecutive failed
+// round doubles the wait up to one minute, then jitter spreads the retries.
+// The first clean poll resets the count. The delay never drops below the
+// configured cadence, so an idle classroom is not polled more often than the
+// user asked for.
+func classroomPollDelay(base time.Duration, failures int) time.Duration {
+	delay := base
+	for i := 0; i < failures && delay > 0 && delay < time.Minute; i++ {
+		delay *= 2
+	}
+	if delay > time.Minute {
+		delay = time.Minute
+	}
+	if delay < base {
+		delay = base
+	}
+	return pollDelay(delay)
+}
+
 func (s *Server) runInClass(ctx context.Context) {
 	delay := 5 * time.Second
+	failures := 0
 	for {
 		timer := time.NewTimer(delay)
 		select {
@@ -95,8 +130,18 @@ func (s *Server) runInClass(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
+		before := s.inClassSnapshot().LastCheckAt
 		s.checkInClass(ctx)
-		delay = s.inClassLoopInterval()
+		// A skipped round (logged out, binding in progress, monitoring off)
+		// does not advance LastCheckAt and must not build up backoff.
+		if after := s.inClassSnapshot(); after.LastCheckAt.After(before) {
+			if after.Error == "" {
+				failures = 0
+			} else {
+				failures++
+			}
+		}
+		delay = classroomPollDelay(s.inClassLoopInterval(), failures)
 	}
 }
 

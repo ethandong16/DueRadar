@@ -100,27 +100,31 @@
   }
   function rank(task, now) {
     if (task.status === "completed") return 4;
-    if (task.status !== "pending") return 2;
+    if (task.status !== "pending") return 3;
     const group = timeGroup(task, now);
-    return group === "upcoming" ? 0 : group === "no_due" ? 1 : 3;
+    // Overdue work comes first: it needs a decision now. Dismissed tasks stay
+    // out of the default selection and are only shown under the explicit filter.
+    return group === "overdue" ? 0 : group === "upcoming" ? 1 : 2;
   }
   function select(tasks, options = {}) {
-    const { status = "all", platform = "all", kind = "all", timing = "all", query = "", scope = "current", now = Date.now(), timezone = defaultTimezone, platformLabel = (id) => id } = options;
+    const { status = "all", platform = "all", kind = "all", timing = "all", query = "", scope = "current", dismissed = "hidden", now = Date.now(), timezone = defaultTimezone, platformLabel = (id) => id } = options;
     const search = query.trim().toLocaleLowerCase();
-    return scopeTasks(tasks, { scope, now, timezone }).filter((task) =>
-      (status === "all" || task.status === status) &&
-      (platform === "all" || task.platform === platform) &&
-      (kind === "all" || task.kind === kind) &&
-      (timing === "all" || timeGroup(task, now) === timing) &&
-      (!search || `${task.title || ""} ${task.course || ""} ${platformLabel(task.platform) || ""}`.toLocaleLowerCase().includes(search))
-    ).sort((a, b) => {
+    return scopeTasks(tasks, { scope, now, timezone }).filter((task) => {
+      const isDismissed = Boolean(task.dismissed_at);
+      return (dismissed === "include" || (dismissed === "only" ? isDismissed : !isDismissed)) &&
+        (status === "all" || task.status === status) &&
+        (platform === "all" || task.platform === platform) &&
+        (kind === "all" || task.kind === kind) &&
+        (timing === "all" || timeGroup(task, now) === timing) &&
+        (!search || `${task.title || ""} ${task.course || ""} ${platformLabel(task.platform) || ""}`.toLocaleLowerCase().includes(search));
+    }).sort((a, b) => {
       const priority = rank(a, now) - rank(b, now);
       if (priority) return priority;
       const left = deadline(a), right = deadline(b);
       if (left !== right) {
         if (left === null) return 1;
         if (right === null) return -1;
-        return rank(a, now) >= 3 ? right - left : left - right;
+        return rank(a, now) === 0 ? right - left : left - right;
       }
       return String(a.id).localeCompare(String(b.id));
     });

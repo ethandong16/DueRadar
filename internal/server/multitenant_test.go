@@ -871,3 +871,138 @@ func TestMultiShutdownWithoutRunWaitsForOwnedJobs(t *testing.T) {
 		t.Fatal("worker accepted a job after shutdown")
 	}
 }
+
+type multiTestSession struct {
+	ID      string `json:"id"`
+	Current bool   `json:"current"`
+}
+
+func multiTestSessionCookie(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == "dueradar_session" {
+			return cookie
+		}
+	}
+	t.Fatal("response did not set a session cookie")
+	return nil
+}
+
+func multiTestSessions(t *testing.T, h http.Handler, cookie *http.Cookie) []multiTestSession {
+	t.Helper()
+	w := multiTestRequest(h, http.MethodGet, "/api/account/sessions", "", cookie)
+	multiTestStatus(t, w, http.StatusOK)
+	var sessions []multiTestSession
+	if err := json.Unmarshal(w.Body.Bytes(), &sessions); err != nil {
+		t.Fatal(err)
+	}
+	return sessions
+}
+
+func TestPasswordChangeRevokesEveryOtherSession(t *testing.T) {
+	_, h := multiTestOpen(t, t.TempDir(), "", true, false)
+	first := multiTestRegister(t, h, "alice", multiTestPasswordA)
+	second := multiTestLogin(t, h, "alice", multiTestPasswordA)
+
+	sessions := multiTestSessions(t, h, first.cookie)
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %+v, want two", sessions)
+	}
+	current := 0
+	for _, session := range sessions {
+		if session.Current {
+			current++
+		}
+	}
+	if current != 1 || sessions[0].ID == "" {
+		t.Fatalf("session view = %+v", sessions)
+	}
+
+	change := func(cookie *http.Cookie, from, to string) *httptest.ResponseRecorder {
+		body := multiTestJSON(t, map[string]string{"current_password": from, "new_password": to})
+		return multiTestRequest(h, http.MethodPost, "/api/account/password", body, cookie)
+	}
+	multiTestStatus(t, change(first.cookie, "wrong-current-password", multiTestPasswordB), http.StatusForbidden)
+
+	w := change(first.cookie, multiTestPasswordA, multiTestPasswordB)
+	multiTestStatus(t, w, http.StatusOK)
+	fresh := multiTestSessionCookie(t, w)
+	if fresh.Value == first.cookie.Value || fresh.Value == second.cookie.Value {
+		t.Fatal("password change did not issue a new session")
+	}
+	for _, cookie := range []*http.Cookie{first.cookie, second.cookie} {
+		multiTestStatus(t, multiTestRequest(h, http.MethodGet, "/api/session", "", cookie), http.StatusUnauthorized)
+	}
+	multiTestStatus(t, multiTestRequest(h, http.MethodGet, "/api/session", "", fresh), http.StatusOK)
+	if sessions = multiTestSessions(t, h, fresh); len(sessions) != 1 || !sessions[0].Current {
+		t.Fatalf("post-change sessions = %+v", sessions)
+	}
+	body := multiTestJSON(t, map[string]string{"username": "alice", "password": multiTestPasswordA})
+	multiTestStatus(t, multiTestRequest(h, http.MethodPost, "/api/login", body, nil), http.StatusUnauthorized)
+	multiTestLogin(t, h, "alice", multiTestPasswordB)
+}
+
+func TestPasswordChangeThrottlesWrongCurrentPassword(t *testing.T) {
+	_, h := multiTestOpen(t, t.TempDir(), "", true, false)
+	user := multiTestRegister(t, h, "alice", multiTestPasswordA)
+	body := multiTestJSON(t, map[string]string{"current_password": "wrong-current-password", "new_password": multiTestPasswordB})
+	limited := false
+	for i := 0; i < 12; i++ {
+		w := multiTestRequest(h, http.MethodPost, "/api/account/password", body, user.cookie)
+		if w.Code == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+		multiTestStatus(t, w, http.StatusForbidden)
+	}
+	if !limited {
+		t.Fatal("repeated wrong current passwords were not rate limited")
+	}
+	// The limiter applies before verification, so even the correct password
+	// waits out the retry interval instead of bypassing the throttle.
+	body = multiTestJSON(t, map[string]string{"current_password": multiTestPasswordA, "new_password": multiTestPasswordB})
+	multiTestStatus(t, multiTestRequest(h, http.MethodPost, "/api/account/password", body, user.cookie), http.StatusTooManyRequests)
+}
+
+func TestSessionRevokeStaysInsideTheAccount(t *testing.T) {
+	_, h := multiTestOpen(t, t.TempDir(), "", true, false)
+	aliceFirst := multiTestRegister(t, h, "alice", multiTestPasswordA)
+	aliceSecond := multiTestLogin(t, h, "alice", multiTestPasswordA)
+	bob := multiTestRegister(t, h, "bob", multiTestPasswordB)
+
+	bobSessions := multiTestSessions(t, h, bob.cookie)
+	if len(bobSessions) != 1 {
+		t.Fatalf("bob sessions = %+v", bobSessions)
+	}
+	body := multiTestJSON(t, map[string]string{"id": bobSessions[0].ID})
+	multiTestStatus(t, multiTestRequest(h, http.MethodPost, "/api/account/sessions/revoke", body, aliceFirst.cookie), http.StatusNotFound)
+	multiTestStatus(t, multiTestRequest(h, http.MethodGet, "/api/session", "", bob.cookie), http.StatusOK)
+
+	var other string
+	for _, session := range multiTestSessions(t, h, aliceFirst.cookie) {
+		if !session.Current {
+			other = session.ID
+		}
+	}
+	if other == "" {
+		t.Fatal("missing second alice session")
+	}
+	body = multiTestJSON(t, map[string]string{"id": other})
+	w := multiTestRequest(h, http.MethodPost, "/api/account/sessions/revoke", body, aliceFirst.cookie)
+	multiTestStatus(t, w, http.StatusOK)
+	multiTestStatus(t, multiTestRequest(h, http.MethodGet, "/api/session", "", aliceSecond.cookie), http.StatusUnauthorized)
+	multiTestStatus(t, multiTestRequest(h, http.MethodGet, "/api/session", "", aliceFirst.cookie), http.StatusOK)
+
+	w = multiTestRequest(h, http.MethodPost, "/api/account/sessions/revoke-others", "", aliceFirst.cookie)
+	multiTestStatus(t, w, http.StatusOK)
+	var result struct {
+		Removed int `json:"removed"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Removed != 0 {
+		t.Fatalf("removed = %d, want 0", result.Removed)
+	}
+	multiTestStatus(t, multiTestRequest(h, http.MethodGet, "/api/session", "", aliceFirst.cookie), http.StatusOK)
+}

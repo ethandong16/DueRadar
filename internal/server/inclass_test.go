@@ -872,3 +872,24 @@ func TestCheckInClassUsesLessonStartWindow(t *testing.T) {
 		t.Fatalf("sent=%v", *sent)
 	}
 }
+
+func TestClassroomPollDelayBacksOffAndCaps(t *testing.T) {
+	base := 5 * time.Second
+	within := func(got, want time.Duration) bool {
+		jitter := want / 10
+		return got >= want-jitter && got <= want+jitter
+	}
+	if got := classroomPollDelay(base, 0); !within(got, base) {
+		t.Fatalf("healthy delay = %v, want about %v", got, base)
+	}
+	if got := classroomPollDelay(base, 1); !within(got, 2*base) {
+		t.Fatalf("first failure delay = %v, want about %v", got, 2*base)
+	}
+	if got := classroomPollDelay(base, 10); !within(got, time.Minute) {
+		t.Fatalf("capped delay = %v, want about 1m", got)
+	}
+	// A slow configured cadence is already gentle; backoff must not shorten it.
+	if got := classroomPollDelay(90*time.Second, 5); !within(got, 90*time.Second) {
+		t.Fatalf("slow cadence = %v, want about 90s", got)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -25,7 +26,12 @@ import (
 	"github.com/ethandong16/due-radar/internal/vault"
 )
 
-const Version = "0.3.3-dev"
+const Version = "0.4.0-dev"
+
+// The state file is read with a 64 MiB limit. Warn well before that ceiling so
+// an operator can review retention or split the instance instead of discovering
+// the limit only when the next start fails.
+const stateSizeWarning = 16 << 20
 
 type session struct{ expires time.Time }
 type attempt struct {
@@ -69,6 +75,7 @@ type Server struct {
 	notifyMu          sync.Mutex
 	lastTestAt        *time.Time
 	lastTestError     string
+	reminderTestAt    time.Time
 	rainMu            sync.Mutex
 	rainState         string
 	rainPreviousLogin string
@@ -124,12 +131,20 @@ func (s *Server) Handler(files fs.FS) http.Handler {
 func (s *Server) handler(static http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, map[string]string{"status": "ok"}) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if s.lifetime.Err() != nil {
+			jsonResponse(w, 503, map[string]string{"status": "stopping"})
+			return
+		}
+		jsonResponse(w, 200, map[string]string{"status": "ready"})
+	})
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("GET /api/session", s.protected(func(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, 200, map[string]bool{"authenticated": true})
 	}))
 	mux.HandleFunc("POST /api/logout", s.protected(s.logout))
 	mux.HandleFunc("GET /api/tasks", s.protected(func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, s.Engine.Snapshot().Tasks) }))
+	mux.HandleFunc("PUT /api/tasks/dismissal", s.protected(s.taskDismissal))
 	mux.HandleFunc("GET /api/accounts", s.protected(s.accounts))
 	mux.HandleFunc("GET /api/settings", s.protected(func(w http.ResponseWriter, r *http.Request) {
 		settings := s.Engine.Snapshot().Settings
@@ -141,6 +156,7 @@ func (s *Server) handler(static http.Handler) http.Handler {
 	mux.HandleFunc("GET /api/analysis", s.protected(s.getAnalysis))
 	mux.HandleFunc("PUT /api/analysis", s.protected(s.setAnalysis))
 	mux.HandleFunc("POST /api/bark/test", s.protected(s.testBark))
+	mux.HandleFunc("POST /api/reminders/test", s.protected(s.testReminder))
 	mux.HandleFunc("POST /api/in-class/test", s.protected(s.testInClass))
 	mux.HandleFunc("POST /api/accounts/rain/login", s.protected(s.startRainLogin))
 	mux.HandleFunc("POST /api/accounts/zhidao/login", s.protected(s.startZhidaoLogin))
@@ -162,6 +178,7 @@ func (s *Server) handler(static http.Handler) http.Handler {
 		jsonResponse(w, 200, trimEvents(s.Engine.Snapshot().Events, 200))
 	}))
 	mux.HandleFunc("GET /api/status", s.protected(s.status))
+	mux.HandleFunc("GET /api/export", s.protected(s.exportData))
 	mux.HandleFunc("POST /api/sync", s.protected(func(w http.ResponseWriter, r *http.Request) {
 		if !s.Demo && s.Vault.Get().RainCookie == "" && s.Vault.Get().ZhidaoSession == "" {
 			fail(w, 409, "请先绑定平台账号")
@@ -386,6 +403,23 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, 200, out)
 }
+func (s *Server) taskDismissal(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Platform  string `json:"platform"`
+		ID        string `json:"id"`
+		Dismissed bool   `json:"dismissed"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	// Dismissal is a local reminder decision, never a claim that the platform
+	// accepted the work. Demo state is ephemeral but may still be dismissed.
+	if err := s.Engine.SetTaskDismissed(input.Platform, input.ID, input.Dismissed, time.Now()); err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	jsonResponse(w, 200, map[string]bool{"ok": true})
+}
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	var settings core.Settings
 	if !decode(w, r, &settings) {
@@ -480,6 +514,135 @@ func (s *Server) testBark(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, 200, map[string]string{"message": "Bark 已接受测试通知"})
 }
+func leadLabel(minutes int) string {
+	switch {
+	case minutes >= 1440 && minutes%1440 == 0:
+		return fmt.Sprintf("%d 天", minutes/1440)
+	case minutes >= 60 && minutes%60 == 0:
+		return fmt.Sprintf("%d 小时", minutes/60)
+	default:
+		return fmt.Sprintf("%d 分钟", minutes)
+	}
+}
+
+func leadList(offsets []int) string {
+	parts := make([]string, 0, len(offsets))
+	for _, n := range offsets {
+		if n > 0 {
+			parts = append(parts, leadLabel(n))
+		}
+	}
+	if len(parts) == 0 {
+		return "未设置提前量"
+	}
+	return strings.Join(parts, "、")
+}
+
+// testReminder sends one sample notification using the saved rule so the user
+// can verify both the Bark channel and what a real reminder will look like. It
+// never creates tasks or events. Quiet hours are reported rather than bypassed,
+// except for the same short-notice exceptions real deliveries use.
+func (s *Server) testReminder(w http.ResponseWriter, r *http.Request) {
+	if s.Demo {
+		fail(w, 409, "演示模式不发送真实通知")
+		return
+	}
+	var input struct {
+		Kind string `json:"kind"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	settings := s.Engine.Snapshot().Settings
+	var offsets []int
+	var title, item, verb string
+	urgentLimit := 30
+	switch input.Kind {
+	case "", "deadline":
+		offsets, item, verb = settings.DeadlineMinutes, "第三章作业", "截止"
+		title = "任务即将截止 · 示例任务"
+	case "video_deadline":
+		offsets, item, verb = settings.VideoMinutes, "第 3 章视频", "截止"
+		title = "视频任务即将截止 · 示例任务"
+	case "exam_start":
+		offsets, item, verb = settings.ExamStartMinutes, "期中考试", "开始"
+		urgentLimit = 60
+		title = "考试即将开始 · 示例考试"
+	default:
+		fail(w, 400, "未知的提醒类型")
+		return
+	}
+	urgent := false
+	first := 0
+	for _, n := range offsets {
+		if n <= 0 {
+			continue
+		}
+		if first == 0 {
+			first = n
+		}
+		if n <= urgentLimit {
+			urgent = true
+		}
+	}
+	if first == 0 {
+		fail(w, 400, "该提醒类型尚未设置提前量，请先在提醒规则中填写")
+		return
+	}
+	now := time.Now()
+	if core.IsQuiet(settings, now) && !urgent {
+		jsonResponse(w, 200, map[string]any{
+			"sent":    false,
+			"quiet":   true,
+			"message": fmt.Sprintf("当前处于静默时段（%s–%s），不会发送测试通知。按当前规则，这类提醒会在静默结束后补发；考试开始前 60 分钟、截止前 30 分钟内的紧急提醒仍会即时推送。", settings.QuietStart, settings.QuietEnd),
+		})
+		return
+	}
+	body := fmt.Sprintf("示例课程 · %s\n将在 %s后%s。\n提醒规则：%s前。\n这是测试提醒，不会生成任务或提醒记录。", item, leadLabel(first), verb, leadList(offsets))
+	s.notifyMu.Lock()
+	if !s.reminderTestAt.IsZero() && now.Sub(s.reminderTestAt) < 10*time.Second {
+		s.notifyMu.Unlock()
+		fail(w, 429, "测试通知发送过于频繁，请稍后再试")
+		return
+	}
+	s.reminderTestAt = now
+	c := s.Vault.Get()
+	err := s.sendBark(r.Context(), c.BarkURL, c.BarkKey, title, body, bark.Options{})
+	s.mu.Lock()
+	s.lastTestAt = &now
+	s.lastTestError = ""
+	if err != nil {
+		s.lastTestError = "Bark 测试通知失败，请检查配置及网络"
+	}
+	s.mu.Unlock()
+	s.notifyMu.Unlock()
+	if err != nil {
+		fail(w, 502, "测试提醒发送失败，请检查 Bark 配置及网络")
+		return
+	}
+	jsonResponse(w, 200, map[string]any{
+		"sent":    true,
+		"quiet":   false,
+		"message": fmt.Sprintf("已发送测试提醒。正式提醒会在%s前按当前规则推送。", leadList(offsets)),
+	})
+}
+
+// exportData gives the user a portable copy of their own task and reminder
+// history. Vault contents (platform cookies, Bark key, API key) are deliberately
+// excluded: exports leave the device and must never carry credentials.
+func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
+	snapshot := s.Engine.Snapshot()
+	now := time.Now().UTC()
+	w.Header().Set("Content-Disposition", `attachment; filename="dueradar-export-`+now.Format("20060102-150405")+`.json"`)
+	jsonResponse(w, 200, map[string]any{
+		"version":     Version,
+		"exported_at": now,
+		"settings":    snapshot.Settings,
+		"tasks":       snapshot.Tasks,
+		"events":      snapshot.Events,
+		"accounts":    snapshot.Accounts,
+	})
+}
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	deliveryError, deliveryAt := s.deliveryError, s.deliveryAt
@@ -515,7 +678,12 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if !zhidaoPoll.LastPollAt.IsZero() {
 		zhidaoLastPoll = zhidaoPoll.LastPollAt
 	}
-	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 2, "go_version": runtime.Version(), "message": "普通雨课堂和知到校内课支持扫码绑定；共享课待实测", "notification_error": deliveryError, "notification_last_attempt_at": deliveryAt, "notification_failure_count": health.UnresolvedFailures, "notification_last_success_at": health.LastSuccessAt,
+	stateSize := s.Engine.StateSize()
+	sizeWarning := ""
+	if stateSize >= stateSizeWarning {
+		sizeWarning = "状态文件已超过 16 MiB，请检查任务与事件保留情况或拆分实例"
+	}
+	jsonResponse(w, 200, map[string]any{"version": Version, "demo": s.Demo, "uptime_seconds": int(time.Since(s.started).Seconds()), "sync_interval_seconds": 900, "scheduler_interval_seconds": 15, "platforms_ready": 2, "go_version": runtime.Version(), "message": "普通雨课堂和知到校内课支持扫码绑定；共享课待实测", "notification_error": deliveryError, "notification_last_attempt_at": deliveryAt, "notification_failure_count": health.UnresolvedFailures, "notification_last_success_at": health.LastSuccessAt, "backup_error": s.Engine.BackupError(), "state_size_bytes": stateSize, "state_size_warning": sizeWarning,
 		"classroom": classroom, "rain_fallback_enabled": settings.RainFallbackEnabled, "rain_analysis_enabled": settings.RainAnalysisEnabled,
 		"in_class_enabled": settings.InClassEnabled, "in_class_poll_seconds": settings.InClassPollSeconds, "in_class_last_check_at": lastCheck, "in_class_lessons": inClass.Lessons, "in_class_last_quiz_at": lastQuiz, "in_class_last_quiz": inClass.LastQuiz, "in_class_detected": inClass.Detected, "in_class_error": inClass.Error,
 		"zhidao_in_class_enabled": settings.ZhidaoInClassEnabled, "zhidao_in_class_last_check_at": zhidaoLastCheck, "zhidao_in_class_lessons": zhidaoPoll.Lessons, "zhidao_in_class_last_poll_at": zhidaoLastPoll, "zhidao_in_class_last_poll": zhidaoPoll.LastPoll, "zhidao_in_class_detected": zhidaoPoll.Detected, "zhidao_in_class_error": zhidaoPoll.Error})
@@ -694,7 +862,12 @@ func (s *Server) deliverWithGuard(ctx context.Context, valid func() bool) {
 			opts = bark.Wake()
 		}
 		err = s.sendBark(ctx, c.BarkURL, c.BarkKey, event.Title, event.Body, opts)
-		s.deliveryResult = &deliveryOutcome{claim: event, sent: err == nil, at: time.Now()}
+		var retryAfter time.Duration
+		var delayed interface{ RetryAfter() time.Duration }
+		if err != nil && errors.As(err, &delayed) {
+			retryAfter = delayed.RetryAfter()
+		}
+		s.deliveryResult = &deliveryOutcome{claim: event, sent: err == nil, permanent: errors.Is(err, bark.ErrPermanent), retryAfter: retryAfter, at: time.Now()}
 		if persistErr := s.persistDelivery(); persistErr != nil {
 			s.setDeliveryError("通知结果保存失败，发送已暂停；请检查数据目录")
 			return
@@ -718,14 +891,27 @@ func (s *Server) Run(ctx context.Context) {
 			s.queueSync()
 		}
 		syncOnce()
+		lastSyncUnix := time.Now().Unix()
 		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
+		// A laptop suspend, a long GC pause, or a manual clock change can leave
+		// the ticker waiting while the snapshot goes stale. Reconcile as soon as
+		// wall time and the last sync disagree by more than one interval.
+		watch := time.NewTicker(time.Minute)
+		defer watch.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				syncOnce()
+				lastSyncUnix = time.Now().Unix()
+			case <-watch.C:
+				now := time.Now().Unix()
+				if delta := now - lastSyncUnix; delta > 20*60 || delta < -60 {
+					syncOnce()
+					lastSyncUnix = now
+				}
 			}
 		}
 	})

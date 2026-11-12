@@ -15,9 +15,10 @@ import (
 )
 
 type Engine struct {
-	mu    sync.Mutex
-	path  string
-	state State
+	mu          sync.Mutex
+	path        string
+	state       State
+	backupError string
 }
 
 // Open creates or opens a private state file. Every process start requires a
@@ -52,6 +53,11 @@ func Open(path string) (*Engine, error) {
 	}
 	if e.state.Version != 1 {
 		return nil, errors.New("unsupported state version")
+	}
+	// Keep one rolling copy of the last readable state before migrations or new
+	// writes. A failed backup never blocks startup, but it is reported in status.
+	if err := backupState(path); err != nil {
+		e.backupError = "备份状态文件失败：" + err.Error()
 	}
 	// Zhidao poll monitoring is on by default, but a stored false is an explicit
 	// opt-out. Only states written before the setting existed lack the key, so
@@ -109,6 +115,62 @@ func (e *Engine) Snapshot() State {
 	return cloneState(e.state)
 }
 
+// BackupError reports a failed rolling state backup so the status view can
+// surface it without turning a read-only or full disk into a startup failure.
+func (e *Engine) BackupError() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.backupError
+}
+
+// StateSize reports the on-disk state size for growth monitoring. The file is
+// replaced atomically, so a stat without the engine lock cannot observe a
+// partially written snapshot.
+func (e *Engine) StateSize() int64 {
+	info, err := os.Stat(e.path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+// backupState refreshes state.json.bak at most once per day. The copy is taken
+// from the already validated file on disk, so it can never contain a state this
+// process refused to load.
+func backupState(path string) error {
+	backup := path + ".bak"
+	if info, err := os.Stat(backup); err == nil && time.Since(info.ModTime()) < 24*time.Hour {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(backup)
+	f, err := os.CreateTemp(dir, ".dueradar-backup-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	if err = f.Chmod(0600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err = f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, backup)
+}
+
 func cloneState(s State) State {
 	// Copy without serialization: invalid adapter timestamps must reach save's
 	// validation error, never turn a transaction into an empty, valid JSON state.
@@ -117,6 +179,7 @@ func cloneState(s State) State {
 	for i := range copy.Tasks {
 		copy.Tasks[i].StartAt = cloneTime(s.Tasks[i].StartAt)
 		copy.Tasks[i].EndAt = cloneTime(s.Tasks[i].EndAt)
+		copy.Tasks[i].DismissedAt = cloneTime(s.Tasks[i].DismissedAt)
 		if s.Tasks[i].Progress != nil {
 			value := *s.Tasks[i].Progress
 			copy.Tasks[i].Progress = &value
@@ -127,10 +190,12 @@ func cloneState(s State) State {
 		copy.Events[i].SentAt = cloneTime(s.Events[i].SentAt)
 		copy.Events[i].AnchorAt = cloneTime(s.Events[i].AnchorAt)
 		copy.Events[i].NextAttemptAt = cloneTime(s.Events[i].NextAttemptAt)
+		copy.Events[i].BlockedUntil = cloneTime(s.Events[i].BlockedUntil)
 	}
 	copy.Accounts = slices.Clone(s.Accounts)
 	for i := range copy.Accounts {
 		copy.Accounts[i].LastSuccessAt = cloneTime(s.Accounts[i].LastSuccessAt)
+		copy.Accounts[i].LastAttemptAt = cloneTime(s.Accounts[i].LastAttemptAt)
 	}
 	copy.Settings.DeadlineMinutes = slices.Clone(s.Settings.DeadlineMinutes)
 	copy.Settings.ExamStartMinutes = slices.Clone(s.Settings.ExamStartMinutes)
@@ -208,6 +273,14 @@ func (e *Engine) save(s State) error {
 			_ = d.Sync()
 			_ = d.Close()
 		}
+	}
+	// Refresh the daily snapshot after a durable commit. If no state changes,
+	// the existing backup is still the latest state. A backup failure must not
+	// fail the write; it is surfaced in the status view.
+	if err := backupState(e.path); err != nil {
+		e.backupError = "备份状态文件失败：" + err.Error()
+	} else {
+		e.backupError = ""
 	}
 	return nil
 }

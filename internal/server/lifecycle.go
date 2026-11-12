@@ -131,10 +131,12 @@ func (s *Server) failRainSync(ctx context.Context, generation uint64, cookie str
 }
 
 type deliveryOutcome struct {
-	claim  core.Event
-	sent   bool
-	at     time.Time
-	unsent *core.Event
+	claim      core.Event
+	sent       bool
+	permanent  bool
+	retryAfter time.Duration
+	at         time.Time
+	unsent     *core.Event
 }
 
 // A failed disk commit is retried before sending anything else. Within this
@@ -149,8 +151,10 @@ func (s *Server) persistDelivery() error {
 		err = s.Engine.ReturnUnsent(*outcome.unsent)
 	} else if outcome.sent {
 		err = s.Engine.MarkSentClaim(outcome.claim, outcome.at)
+	} else if outcome.permanent {
+		err = s.Engine.MarkPermanentFailureClaim(outcome.claim, outcome.at)
 	} else {
-		err = s.Engine.MarkFailedClaim(outcome.claim, "通知发送失败", outcome.at)
+		err = s.Engine.MarkFailedClaimAfter(outcome.claim, "通知发送失败", outcome.retryAfter, outcome.at)
 	}
 	if err != nil && !errors.Is(err, core.ErrStaleClaim) {
 		return err

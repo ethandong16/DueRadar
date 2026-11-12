@@ -25,6 +25,11 @@ type Task struct {
 	SourceTimezone string     `json:"source_timezone,omitempty"`
 	Historical     bool       `json:"historical"`
 	LastSyncedAt   time.Time  `json:"last_synced_at"`
+	// DismissedAt is a DueRadar-only decision. It lets a user stop reminders for
+	// an overdue task the platform can no longer accept, without claiming the
+	// task was completed. Platform sync never sets it, and it is cleared
+	// automatically if the platform later extends the deadline.
+	DismissedAt *time.Time `json:"dismissed_at,omitempty"`
 }
 
 type Settings struct {
@@ -69,6 +74,7 @@ type Account struct {
 	LoginState          string     `json:"login_state"`
 	SyncState           string     `json:"sync_state"`
 	LastSuccessAt       *time.Time `json:"last_success_at"`
+	LastAttemptAt       *time.Time `json:"last_attempt_at,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`
 	LastError           string     `json:"last_error,omitempty"`
 	NeedsRevalidation   bool       `json:"needs_revalidation"`
@@ -93,6 +99,13 @@ type Event struct {
 	AnchorAt      *time.Time `json:"anchor_at,omitempty"`
 	MinutesBefore int        `json:"minutes_before,omitempty"`
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
+	// BlockedReason explains why an actionable event is not being sent right
+	// now. It is derived state, persisted so the activity view still explains a
+	// pending event after a restart.
+	BlockedReason string     `json:"blocked_reason,omitempty"`
+	BlockedUntil  *time.Time `json:"blocked_until,omitempty"`
+	// PermanentFailure means retrying cannot succeed (for example a Bark 4xx).
+	PermanentFailure bool `json:"permanent_failure,omitempty"`
 	// ClaimID identifies the last durable reservation, not the event itself.
 	ClaimID         uint64    `json:"claim_id,omitempty"`
 	ClaimState      string    `json:"claim_state,omitempty"`

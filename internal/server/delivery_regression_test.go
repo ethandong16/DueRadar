@@ -109,7 +109,10 @@ func TestNotificationHealthClearsAfterReminderRuleRemoval(t *testing.T) {
 	}
 	s.Deliver(context.Background())
 	before := readNotificationHealth(t, s)
-	if calls != 4 || failed != 2 || before.Failures != 2 || before.Error == "" {
+	// The new-task notice and the 60-minute deadline reminder for each task are
+	// due at the same moment; the serial sender keeps only the scheduled one, so
+	// two tasks produce two pushes instead of four.
+	if calls != 2 || failed != 2 || before.Failures != 2 || before.Error == "" {
 		t.Fatalf("scheduled failures were not exercised: calls=%d failed=%d status=%+v", calls, failed, before)
 	}
 	settings.DeadlineMinutes = nil
@@ -118,7 +121,7 @@ func TestNotificationHealthClearsAfterReminderRuleRemoval(t *testing.T) {
 	}
 	for tick := 0; tick < 2; tick++ {
 		after := readNotificationHealth(t, s)
-		if after.Failures != 0 || after.Error != "" || calls != 4 {
+		if after.Failures != 0 || after.Error != "" || calls != 2 {
 			t.Fatalf("removed rule retained a failure: tick=%d calls=%d status=%+v", tick, calls, after)
 		}
 		s.Deliver(context.Background())

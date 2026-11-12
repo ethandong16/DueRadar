@@ -13,6 +13,19 @@
   eventNames.fault = "平台故障";
   eventStatuses.sending = ["正在发送", "warning"];
   syncStatuses.revalidating = ["重新验证中", "warning"];
+  // Stable identifiers emitted by the reminder engine. The activity view shows
+  // why an event is still waiting instead of making the user infer it.
+  const blockedReasons = {
+    waiting_sync: "等待平台首次成功同步",
+    sync_failed: "平台同步失败，恢复后发送",
+    needs_login: "平台登录已失效，请重新绑定",
+    stale_sync: "同步数据已过期，等待下一轮同步",
+    quiet_hours: "静默时段，结束后发送",
+    retry_backoff: "发送失败，等待重试",
+    retry_exhausted: "重试次数已用尽",
+    permanent: "Bark 拒绝了通知，请检查服务地址和设备密钥",
+    missed: "已错过：任务已截止、已完成或状态已变化"
+  };
   let state = null;
   let currentView = "tasks";
   let statusFilter = "all";
@@ -27,6 +40,8 @@
   let barkDirty = false;
   let analysisDirty = false;
   let zhidaoDirty = false;
+  const dismissSelection = new Set();
+  let detailTask = null;
 
   function node(tag, className, content) {
     const result = document.createElement(tag);
@@ -58,6 +73,13 @@
     try { return new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date); }
     catch { return new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(date); }
   }
+  function formatBytes(value) {
+    const bytes = Number(value) || 0;
+    if (bytes <= 0) return "尚未写入";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
   function relativeLabel(date, verb = "截止") {
     const diff = date.getTime() - Date.now();
     if (diff <= 0) return `已过${verb}`;
@@ -67,6 +89,7 @@
     return `${Math.ceil(minutes / 1440)} 天后${verb}`;
   }
   function agendaGroup(task) {
+    if (task.dismissed_at) return "已忽略";
     if (task.status === "completed") return "已完成";
     const due = timestamp(task.due_at);
     if (!due) return "截止未知";
@@ -77,6 +100,13 @@
     if (key === dayKey(new Date(now + 86400000))) return "明天";
     if (due.getTime() - now <= 7 * 86400000) return "未来七天";
     return "更远";
+  }
+  function taskKey(task) { return `${task.platform || ""}\u0000${task.id || ""}`; }
+  function isDismissed(task) { return Boolean(task.dismissed_at); }
+  // Only work the platform can no longer accept can be silenced. A future
+  // deadline stays protected so a dismissal cannot hide an upcoming reminder.
+  function isDismissible(task) {
+    return task.status === "pending" && !isDismissed(task) && DueRadarTasks.timeGroup(task, Date.now()) === "overdue";
   }
   // Exams matter at their start, everything else at its deadline.
   function nextMoment(task) {
@@ -116,6 +146,12 @@
     $("login-password-confirm").value = "";
     $("user-identity").hidden = true;
     $("first-setup").hidden = true;
+    dismissSelection.clear();
+    detailTask = null;
+    if ($("task-dialog").open) $("task-dialog").close();
+    if ($("dismiss-dialog").open) $("dismiss-dialog").close();
+    if ($("account-dialog").open) $("account-dialog").close();
+    updateDismissBar();
     clearActiveLogin();
     $("boot").hidden = true;
     $("app").hidden = true;
@@ -163,11 +199,25 @@
   async function busy(button, action) {
     button.dataset.busy = "true";
     button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    const spinner = node("span", "button-spinner");
+    spinner.setAttribute("aria-hidden", "true");
+    button.append(spinner);
     try { await action(); } catch (error) { if (error.name !== "StaleSessionError") notify(error.message || "操作失败，请稍后重试。", true); }
-    finally { delete button.dataset.busy; button.disabled = false; }
+    finally {
+      delete button.dataset.busy;
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      if (typeof spinner.remove === "function") spinner.remove();
+    }
   }
+  function hasUnsavedChanges() { return settingsDirty || barkDirty || analysisDirty || zhidaoDirty; }
+  // Destructive account actions ask once before running. Test harnesses omit
+  // window.confirm, so treat its absence as approval instead of throwing.
+  function askConfirm(message) { return typeof confirm !== "function" || confirm(message); }
   function changeView(view, updateHash = true) {
     if (!Object.hasOwn(viewNames, view)) view = "tasks";
+    if (view !== currentView && currentView === "settings" && hasUnsavedChanges() && typeof confirm === "function" && !confirm("通知设置还有未保存的修改，离开将丢失。确定离开吗？")) return;
     currentView = view;
     for (const key of Object.keys(viewNames)) $("view-" + key).hidden = key !== view;
     document.querySelectorAll(".nav-link").forEach((button) => {
@@ -215,7 +265,15 @@
     const platform = $("platform-filter").value;
     const scope = $("scope-filter").value;
     updateFilterCount();
-    const filtered = DueRadarTasks.select(tasks, { status: statusFilter, platform, query, kind: $("kind-filter").value, timing: $("deadline-filter").value, scope, platformLabel: platformName });
+    // Dismissed tasks are a separate, explicit view: the default list only
+    // shows work that can still act on a reminder.
+    const dismissedMode = statusFilter === "dismissed" ? "only" : "hidden";
+    const filtered = DueRadarTasks.select(tasks, { status: statusFilter === "dismissed" ? "all" : statusFilter, platform, query, kind: $("kind-filter").value, timing: $("deadline-filter").value, scope, dismissed: dismissedMode, platformLabel: platformName });
+    for (const key of dismissSelection) {
+      const task = tasks.find((item) => taskKey(item) === key);
+      if (!task || !isDismissible(task)) dismissSelection.delete(key);
+    }
+    updateDismissBar();
     const page = DueRadarTasks.paginate(filtered, taskPage);
     taskPage = page.page;
     $("task-pagination").hidden = filtered.length === 0;
@@ -234,17 +292,20 @@
       // "No tasks this semester" is only true when the semester itself is empty.
       // With tasks present, an empty filtered list means the filters matched
       // nothing, even if every current-semester task was filtered out.
-      if (scope === "current" && scoped.length === 0 && hiddenHistory) {
+      const hasDismissed = DueRadarTasks.select(tasks, { scope, dismissed: "only" }).length > 0;
+      if (statusFilter === "dismissed" && !hasDismissed) {
+        $("task-list").append(emptyState("没有已忽略的任务", "已过截止且无法提交的任务可以在列表中勾选，然后选择“不再提醒”。"));
+      } else if (scope === "current" && scoped.length === 0 && hiddenHistory) {
         $("task-list").append(emptyState("本学期暂无任务", "", { label: "查看历史学期", run: () => { $("scope-filter").value = "all"; taskPage = 1; render(); } }));
       } else if (scoped.length) {
-        $("task-list").append(emptyState("没有符合筛选条件的任务", "", { label: "清除筛选", run: () => { statusFilter = "all"; taskPage = 1; $("task-search").value = ""; for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all"; $("scope-filter").value = "current"; render(); } }));
+        $("task-list").append(emptyState("没有符合筛选条件的任务", "", { label: "清除筛选", run: () => { statusFilter = "all"; taskPage = 1; dismissSelection.clear(); $("task-search").value = ""; for (const id of ["platform-filter", "kind-filter", "deadline-filter"]) $(id).value = "all"; $("scope-filter").value = "current"; render(); } }));
       } else {
         $("task-list").append(emptyState("还没有学习任务", "同步成功后显示作业、考试和视频。", { label: "查看平台接入状态 →", run: () => changeView("accounts") }));
       }
       return;
     }
     const fragment = document.createDocumentFragment();
-    const order = ["今天", "明天", "未来七天", "更远", "截止未知", "已过截止", "已完成"];
+    const order = ["已过截止", "今天", "明天", "未来七天", "更远", "截止未知", "已完成", "已忽略"];
     const groups = new Map(order.map((label) => [label, []]));
     for (const task of page.items) groups.get(agendaGroup(task)).push(task);
     for (const label of order) {
@@ -260,9 +321,24 @@
         const due = timestamp(task.due_at);
         const now = Date.now();
         const isCompleted = task.status === "completed";
-        const isOverdue = !isCompleted && Boolean(due) && due.getTime() <= now;
-        const isUrgent = task.status === "pending" && Boolean(due) && due.getTime() > now && due.getTime() - now <= 86400000;
-        const card = node("article", `task-item${isUrgent ? " is-urgent" : ""}${isOverdue ? " is-overdue" : ""}${isCompleted ? " is-completed" : ""}`);
+        const isSilenced = isDismissed(task);
+        const isOverdue = !isCompleted && !isSilenced && Boolean(due) && due.getTime() <= now;
+        const isUrgent = task.status === "pending" && !isSilenced && Boolean(due) && due.getTime() > now && due.getTime() - now <= 86400000;
+        const card = node("article", `task-item${isUrgent ? " is-urgent" : ""}${isOverdue ? " is-overdue" : ""}${isCompleted ? " is-completed" : ""}${isSilenced ? " is-dismissed" : ""}${isDismissible(task) ? " has-select" : ""}`);
+        if (isDismissible(task)) {
+          const select = node("label", "task-select");
+          select.dataset.focusKey = `task:${task.platform}:${task.id}:select`;
+          const box = node("input");
+          box.type = "checkbox";
+          box.checked = dismissSelection.has(taskKey(task));
+          box.setAttribute("aria-label", `选择“${task.title || "未命名任务"}”`);
+          box.addEventListener("change", () => {
+            if (box.checked) dismissSelection.add(taskKey(task)); else dismissSelection.delete(taskKey(task));
+            updateDismissBar();
+          });
+          select.append(box);
+          card.append(select);
+        }
         const parts = dateParts(task.due_at);
         const when = node("div", "task-when");
         when.append(node("span", "task-when__date", parts.date), node("span", "task-when__time", parts.time));
@@ -282,9 +358,22 @@
         }
         const deadline = deadlineLabel(task);
         const foot = node("div", "task-foot");
-        foot.append(node("span", `deadline-main${deadline.urgent && !isCompleted ? " urgent" : ""}`, isCompleted ? "平台已记录完成" : deadline.main));
+        const dueText = isSilenced ? "已忽略提醒 · 不会再发送" : isCompleted ? "平台已记录完成" : deadline.main;
+        foot.append(node("span", `deadline-main${deadline.urgent && !isCompleted && !isSilenced ? " urgent" : ""}`, dueText));
         const source = DueRadarTasks.safeSource(task.source_url);
         if (source) { const link = node("a", "task-source", "打开课程平台 ↗"); link.href = source; link.target = "_blank"; link.rel = "noopener noreferrer"; link.dataset.focusKey = `task:${task.platform}:${task.id}:source`; foot.append(link); }
+        const detailButton = node("button", "task-detail-button", "详情");
+        detailButton.type = "button";
+        detailButton.dataset.focusKey = `task:${task.platform}:${task.id}:detail`;
+        detailButton.addEventListener("click", () => openTaskDialog(task));
+        foot.append(detailButton);
+        if (isSilenced) {
+          const restore = node("button", "task-detail-button", "恢复提醒");
+          restore.type = "button";
+          restore.dataset.focusKey = `task:${task.platform}:${task.id}:restore`;
+          restore.addEventListener("click", () => busy(restore, () => setTaskDismissed([task], false)));
+          foot.append(restore);
+        }
         main.append(foot);
         main.title = `最近观测：${formatDate(task.last_seen_at)}`;
         const mark = node("span", `task-kind ${kind}`, { homework: "作", exam: "考", chapter: "章", video: "视" }[kind]);
@@ -296,7 +385,168 @@
     }
     $("task-list").append(fragment);
   }
-  function updateFilterTabs() { const scoped = DueRadarTasks.scopeTasks(state?.tasks || [], { scope: $("scope-filter").value, timezone: state?.settings?.timezone || defaults.timezone }); document.querySelectorAll("[data-status]").forEach((button) => { const active = button.dataset.status === statusFilter; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); const status = button.dataset.status; const count = scoped.filter(task => status === "all" || task.status === status).length; button.textContent = `${status === "all" ? "全部" : taskStatus[status][0]} ${count}`; }); }
+  function updateDismissBar() {
+    const count = dismissSelection.size;
+    $("dismiss-bar").hidden = count === 0;
+    $("dismiss-count").textContent = count ? `已选择 ${count} 项已过截止任务` : "未选择任务";
+    $("dismiss-selected").disabled = count === 0;
+  }
+  function selectedTasks() {
+    return (state?.tasks || []).filter((task) => dismissSelection.has(taskKey(task)));
+  }
+  // Dismissal is local to DueRadar: it never marks work complete and never
+  // changes anything on the platform.
+  async function setTaskDismissed(tasks, dismissed) {
+    let changed = 0;
+    for (const task of tasks) {
+      await api("/api/tasks/dismissal", "PUT", { platform: task.platform, id: task.id, dismissed });
+      changed++;
+    }
+    dismissSelection.clear();
+    updateDismissBar();
+    if (await refreshState()) notify(dismissed ? `已停止 ${changed} 项任务的提醒，可在“已忽略”中恢复。` : `已恢复 ${changed} 项任务的提醒。`);
+  }
+  function openDismissDialog() {
+    const tasks = selectedTasks();
+    if (!tasks.length) return;
+    $("dismiss-preview").textContent = tasks.map((task) => `· ${task.title || "未命名任务"}`).join("\n");
+    $("dismiss-dialog").showModal();
+  }
+  function openTaskDialog(task) {
+    detailTask = task;
+    $("task-dialog-title").textContent = task.title || "未命名任务";
+    $("task-dialog-sub").textContent = [platformName(task.platform), task.course || "课程未知", kindNames[task.kind] || "其他任务"].join(" · ");
+    const body = $("task-dialog-body");
+    body.replaceChildren();
+    const rows = [
+      ["平台状态", cleanStatus(taskStatus, task.status)[0]],
+      ["截止时间", task.due_at ? formatDate(task.due_at) : "平台未提供"],
+    ];
+    if (task.kind === "exam") rows.push(["开始时间", task.start_at ? formatDate(task.start_at) : "平台未提供"]);
+    if (task.kind === "video" && typeof task.progress === "number" && Number.isFinite(task.progress)) rows.push(["学习进度", `${Math.round(Math.max(0, Math.min(100, task.progress)))}%`]);
+    rows.push(["最近观测", formatDate(task.last_seen_at)]);
+    if (isDismissed(task)) rows.push(["提醒", "已忽略，不会再发送"]);
+    else {
+      const reminder = DueRadarTasks.nextReminder(state.events, task.id);
+      const lead = reminder ? DueRadarTasks.leadLabel(reminder.minutes) : "";
+      rows.push(["下一条提醒", reminder ? `提前 ${lead || "已到时间"} · ${formatDate(new Date(reminder.at))}` : "暂无待发送提醒"]);
+    }
+    const dl = node("dl", "detail-list");
+    for (const [label, value] of rows) {
+      const row = node("div", "detail-row");
+      row.append(node("dt", "", label), node("dd", "", value));
+      dl.append(row);
+    }
+    body.append(dl);
+    const source = DueRadarTasks.safeSource(task.source_url);
+    if (source) {
+      const link = node("a", "button secondary detail-link", "打开课程平台 ↗");
+      link.href = source; link.target = "_blank"; link.rel = "noopener noreferrer";
+      body.append(link);
+    }
+    const action = $("task-dialog-action");
+    action.hidden = true;
+    action.onclick = null;
+    if (isDismissed(task)) {
+      action.hidden = false;
+      action.textContent = "恢复提醒";
+      action.onclick = () => busy(action, async () => { $("task-dialog").close(); await setTaskDismissed([task], false); });
+    } else if (isDismissible(task)) {
+      action.hidden = false;
+      action.textContent = "不再提醒";
+      action.onclick = () => {
+        $("task-dialog").close();
+        dismissSelection.clear();
+        dismissSelection.add(taskKey(task));
+        updateDismissBar();
+        openDismissDialog();
+      };
+    }
+    $("task-dialog").showModal();
+  }
+  async function loadAccountSessions() {
+    const list = $("session-list");
+    list.replaceChildren();
+    $("revoke-others").hidden = false;
+    let sessions;
+    try {
+      sessions = await api("/api/account/sessions");
+    } catch (error) {
+      if (error.name === "StaleSessionError") throw error;
+      $("revoke-others").hidden = true;
+      list.append(node("p", "field-hint", "当前部署不支持会话管理；退出登录仍然可用。"));
+      return;
+    }
+    if (!Array.isArray(sessions) || !sessions.length) {
+      list.append(node("p", "field-hint", "没有可显示的活动会话。"));
+      return;
+    }
+    for (const session of sessions) {
+      const item = node("div", "session-item");
+      const text = node("div");
+      const created = timestamp(session.created_at);
+      text.append(node("strong", "", session.current ? "当前设备" : "其他设备"));
+      text.append(node("span", "session-item__meta", created ? `登录于 ${formatDate(session.created_at)}` : "此前登录"));
+      item.append(text, badge(session.current ? "使用中" : "有效", session.current ? "success" : "neutral"));
+      if (!session.current && session.id) {
+        const revoke = node("button", "task-detail-button", "退出");
+        revoke.type = "button";
+        revoke.addEventListener("click", () => {
+          if (!askConfirm("确定让该设备退出登录吗？它需要重新输入密码。")) return;
+          return busy(revoke, async () => {
+            await api("/api/account/sessions/revoke", "POST", { id: session.id });
+            await loadAccountSessions();
+            notify("该设备已退出登录。");
+          });
+        });
+        item.append(revoke);
+      }
+      list.append(item);
+    }
+  }
+  async function openAccountDialog() {
+    const name = currentUser?.username || "";
+    $("account-sub").textContent = name ? `已登录：${name}` : "管理当前 DueRadar 账号的密码、登录设备和数据。";
+    $("password-form").reset();
+    $("account-dialog").showModal();
+    try { await loadAccountSessions(); }
+    catch (error) { if (error.name !== "StaleSessionError") notify(error.message || "会话列表加载失败。", true); }
+  }
+  async function downloadExport(button) {
+    await busy(button, async () => {
+      const response = await fetch("/api/export", { credentials: "same-origin", cache: "no-store" });
+      if (!response.ok) {
+        let message = `导出失败（${response.status}）`;
+        try { const body = await response.json(); message = body.error || body.message || message; } catch { /* keep status text */ }
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get("content-disposition") || "";
+      const match = /filename="([^"]+)"/.exec(disposition);
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = match ? match[1] : "dueradar-export.json";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      notify("数据导出已开始下载。");
+    });
+  }
+  function updateFilterTabs() {
+    const scoped = DueRadarTasks.scopeTasks(state?.tasks || [], { scope: $("scope-filter").value, timezone: state?.settings?.timezone || defaults.timezone });
+    document.querySelectorAll("[data-status]").forEach((button) => {
+      const status = button.dataset.status;
+      const active = status === statusFilter;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+      let count;
+      if (status === "all") count = scoped.filter((task) => !isDismissed(task)).length;
+      else if (status === "dismissed") count = scoped.filter(isDismissed).length;
+      else count = scoped.filter((task) => !isDismissed(task) && task.status === status).length;
+      button.textContent = `${status === "all" ? "全部" : status === "dismissed" ? "已忽略" : taskStatus[status][0]} ${count}`;
+    });
+  }
   function renderPlatforms() {
     $("platform-list").replaceChildren();
     if (!state.platforms.length) { $("platform-list").append(emptyState("暂无平台信息", "")); return; }
@@ -311,6 +561,7 @@
       for (const [label, mapping, value] of [["账号状态", loginStatuses, platform.login_status], ["同步状态", syncStatuses, platform.sync_status]]) { const row = node("div", "platform-status"); row.append(node("span", "", label), badge(...cleanStatus(mapping, value))); card.append(row); }
       card.append(node("p", "platform-message", platform.message || "待验证"));
       card.append(node("p", "platform-date", `最近成功同步：${timestamp(platform.last_success) ? formatDate(platform.last_success) : "尚无成功记录"}`));
+      if (platform.last_attempt_at) card.append(node("p", "platform-date", `最近尝试：${formatDate(platform.last_attempt_at)}`));
       if (["rain", "zhidao_campus"].includes(platform.id) && !state.demo) card.append(node("p", "platform-date", "重新绑定成功后，将清除该平台旧任务与通知记录，再同步新账号的数据。"));
       if (Number(platform.failures) > 0) card.append(node("p", "platform-date", `连续失败：${Number(platform.failures)} 轮`));
       if (["rain", "zhidao_campus"].includes(platform.id) && platform.ready && state.runtime && !state.demo) {
@@ -449,7 +700,11 @@
     for (const event of [...events].sort((a, b) => (timestamp(b.due_at)?.getTime() || 0) - (timestamp(a.due_at)?.getTime() || 0))) {
       const row = node("tr"); const name = node("td", "", eventTitle(event)); name.append(node("small", "", eventNames[event.kind] || event.kind || "任务提醒"));
       const status = node("td"); status.append(badge(...cleanStatus(eventStatuses, event.status)));
-      row.append(name, node("td", "", formatDate(event.due_at)), status, node("td", "", event.attempts ?? 0), node("td", "", event.last_error || "—")); fragment.append(row);
+      if (event.attempts > 0) status.append(node("small", "", `尝试 ${event.attempts} 次`));
+      const sent = event.sent_at ? formatDate(event.sent_at, true) : "—";
+      const next = event.next_attempt_at && ["pending", "sending", "failed"].includes(event.status) ? formatDate(event.next_attempt_at, true) : "—";
+      const reason = blockedReasons[event.blocked_reason] || event.last_error || (event.permanent_failure ? blockedReasons.permanent : "—");
+      row.append(name, node("td", "", formatDate(event.due_at)), status, node("td", "", sent), node("td", "", next), node("td", "", reason)); fragment.append(row);
     }
     $("event-list").append(fragment);
   }
@@ -468,6 +723,17 @@
     $("rain-fallback-enabled").checked = Boolean(settings.rain_fallback_enabled);
     $("rain-analysis-enabled").checked = Boolean(settings.rain_analysis_enabled);
   }
+  function ruleSummary(settings) {
+    const part = (label, minutes) => {
+      const values = (minutes || []).filter((value) => value > 0);
+      return values.length ? `${label}提前 ${values.map((value) => DueRadarTasks.leadLabel(value)).join("、")}` : `${label}不提醒`;
+    };
+    return `${part("作业/章节/考试截止", settings.deadline_minutes)}；${part("考试开始", settings.exam_start_minutes)}；${part("视频截止", settings.video_minutes)}。`;
+  }
+  function renderRuleSummary() {
+    if (!state?.settings) return;
+    $("rule-summary").textContent = ruleSummary(state.settings) + (settingsDirty ? " 修改后需保存才会生效。" : "");
+  }
   // Background refreshes rebuild these lists. Without restoring focus, a
   // keyboard user who is tabbing through a task or platform loses their place
   // every 30 seconds.
@@ -483,17 +749,45 @@
     try { target = document.querySelector(`[data-focus-key="${key.replace(/["\\]/g, "\\$&")}"]`); } catch { return; }
     if (target && typeof target.focus === "function") target.focus({ preventScroll: true });
   }
+  // The rail's service indicator disappears on mobile. This chip keeps the
+  // answer to "do I need to worry?" in the top bar: connection trouble first,
+  // otherwise the number of tasks that still need action.
+  function updateStatusChip() {
+    const text = $("status-chip-text");
+    if (!text) return;
+    const pending = Number($("nav-count").textContent) || 0;
+    const service = $("service-label").textContent;
+    const degraded = service === "连接暂时中断" || service === "部分信息加载失败";
+    $("status-chip-dot").classList.toggle("offline", degraded);
+    text.textContent = degraded ? service : pending === 0 ? "无待办" : `${pending} 项待完成`;
+    $("status-chip").title = `${degraded ? service : text.textContent}；点击查看运行记录`;
+  }
   function render() {
     const focusKey = activeFocusKey();
     const tasks = DueRadarTasks.scopeTasks(state.tasks, { scope: $("scope-filter").value, timezone: state.settings?.timezone || defaults.timezone });
-    const pending = tasks.filter((task) => task.status === "pending");
+    const active = tasks.filter((task) => !isDismissed(task));
+    const pending = active.filter((task) => task.status === "pending");
     $("stat-pending").textContent = pending.length;
+    const allClear = $("all-clear");
+    allClear.hidden = pending.length > 0 || active.length === 0;
+    if (!allClear.hidden) {
+      const done = active.filter((task) => task.status === "completed").length;
+      const detail = done
+        ? `已完成 ${done} 项。雷达安静；下一道截止出现时会自动提醒。`
+        : "雷达安静；下一道截止出现时会自动提醒。";
+      // This card is a live region; do not re-announce unchanged text on the
+      // 30-second background refresh.
+      if ($("all-clear-detail").textContent !== detail) $("all-clear-detail").textContent = detail;
+    }
     const overdue = pending.filter(task => DueRadarTasks.timeGroup(task, Date.now()) === "overdue").length;
     const noDue = pending.filter(task => DueRadarTasks.timeGroup(task, Date.now()) === "no_due").length;
     $("pending-detail").textContent = `${overdue} 项已过截止 · ${noDue} 项截止未知`;
     $("nav-count").textContent = pending.length;
-    $("stat-soon").textContent = pending.filter((task) => { const due = timestamp(task.due_at)?.getTime(); return due && due > Date.now() && due - Date.now() <= 86400000; }).length;
-    $("stat-completed").textContent = tasks.filter((task) => task.status === "completed").length;
+    updateStatusChip();
+    const soon = pending.filter((task) => { const due = timestamp(task.due_at)?.getTime(); return due && due > Date.now() && due - Date.now() <= 86400000; }).length;
+    $("stat-soon").textContent = soon;
+    if ($("stat-soon").parentElement) $("stat-soon").parentElement.classList.toggle("is-alert", soon > 0);
+    $("stat-completed").textContent = active.filter((task) => task.status === "completed").length;
     $("stat-platforms").textContent = state.platforms.filter((platform) => ["logged_in", "authenticated", "active"].includes(platform.login_status)).length;
     $("stat-platform-total").textContent = ` / ${state.platforms.length}`;
     const recent = state.platforms.map((platform) => timestamp(platform.last_success)).filter(Boolean).sort((a, b) => b - a)[0];
@@ -526,6 +820,7 @@
     $("quiet-title").textContent = !state.settings ? "提醒设置尚未加载" : settings.quiet_enabled ? "静默时段已开启" : "静默时段已关闭";
     $("quiet-summary").textContent = !state.settings ? "任务已显示，正在读取提醒设置。" : settings.quiet_enabled ? `${settings.quiet_start}—${settings.quiet_end}，普通提醒延后。时区：${settings.timezone}。` : `所有提醒按配置时间发送。时区：${settings.timezone}。`;
     if (state.settings && !settingsDirty) populateSettings(settings);
+    renderRuleSummary();
     $("settings-form").querySelectorAll("input, select").forEach(input => { input.disabled = !state.settings || !state.runtime; });
     const settingsButton = $("settings-form").querySelector("button[type=submit]");
     settingsButton.disabled = !state.settings || !state.runtime || settingsButton.dataset.busy === "true";
@@ -537,6 +832,8 @@
     $("bark-test").disabled = !barkConfigured || barkUnavailable;
     $("in-class-test").disabled = !barkConfigured || barkUnavailable;
     $("in-class-test-poll").disabled = !barkConfigured || barkUnavailable;
+    $("reminder-test").disabled = !barkConfigured || barkUnavailable;
+    $("reminder-test-kind").disabled = !barkConfigured || barkUnavailable;
     const barkButton = $("bark-form").querySelector("button[type=submit]");
     barkButton.disabled = barkUnavailable || barkButton.dataset.busy === "true";
     $("bark-key").disabled = barkUnavailable;
@@ -594,7 +891,7 @@
     const zhidaoPollLessons = Array.isArray(runtime.zhidao_in_class_lessons) ? runtime.zhidao_in_class_lessons : [];
     const zhidaoPollRecent = runtime.zhidao_in_class_last_poll_at ? `${runtime.zhidao_in_class_last_poll || "课堂投票"} · ${formatDate(runtime.zhidao_in_class_last_poll_at, true)}` : "";
     const zhidaoPollState = !zhidaoPollOn ? "已关闭" : runtime.zhidao_in_class_error ? runtime.zhidao_in_class_error : zhidaoPollRecent || (zhidaoPollLessons.length ? `正在上课 · ${zhidaoPollLessons.join("、")}` : runtime.zhidao_in_class_last_check_at ? `守候中 · ${formatDate(runtime.zhidao_in_class_last_check_at, true)}` : "等待首次检查");
-    const readouts = [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["课上互动监测", state.runtime ? inClassState : "尚未加载"], ["最近课上检测", state.runtime ? inClassRecent : "尚未加载"], ["知到课堂投票检测", state.runtime ? zhidaoPollState : "尚未加载"], ["雨课堂随堂助手", !runtime.rain_fallback_enabled && !runtime.rain_analysis_enabled ? "已关闭" : runtime.classroom?.error || `实时连接 ${runtime.classroom?.connected || 0} 个 · 兜底${runtime.rain_fallback_enabled ? "开" : "关"} / AI ${runtime.rain_analysis_enabled ? "开" : "关"}`], ["最近兜底动作", runtime.classroom?.last_action || "暂无记录"], ["通知运行状态", state.runtime ? runtime.notification_error || "正常" : "尚未加载"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"]];
+    const readouts = [["服务版本", runtime.version || "未知"], ["持续运行", uptime], ["通知调度周期", interval], ["课上互动监测", state.runtime ? inClassState : "尚未加载"], ["最近课上检测", state.runtime ? inClassRecent : "尚未加载"], ["知到课堂投票检测", state.runtime ? zhidaoPollState : "尚未加载"], ["雨课堂随堂助手", !runtime.rain_fallback_enabled && !runtime.rain_analysis_enabled ? "已关闭" : runtime.classroom?.error || `实时连接 ${runtime.classroom?.connected || 0} 个 · 兜底${runtime.rain_fallback_enabled ? "开" : "关"} / AI ${runtime.rain_analysis_enabled ? "开" : "关"}`], ["最近兜底动作", runtime.classroom?.last_action || "暂无记录"], ["通知运行状态", state.runtime ? runtime.notification_error || "正常" : "尚未加载"], ["最近通知成功", runtime.notification_last_success_at ? formatDate(runtime.notification_last_success_at) : "暂无成功记录"], ["数据备份", runtime.backup_error || "每日自动备份正常"], ["数据文件", state.runtime ? runtime.state_size_warning || formatBytes(runtime.state_size_bytes) : "尚未加载"]];
     readouts.forEach(([label, value], index) => {
       const card = node("article", "runtime-card");
       if (index === readouts.length - 1) card.classList.add("runtime-card--wide");
@@ -616,7 +913,13 @@
       const steps = [];
       if (!setup.platforms_bound) steps.push({ label: "绑定雨课堂或知到账号", view: "accounts" });
       if (!setup.bark_configured) steps.push({ label: "配置 Bark 通知并发送测试", view: "settings" });
-      $("first-setup-summary").textContent = "每个 DueRadar 账号拥有独立的平台会话、任务和通知设置。";
+      steps.push({ label: "检查提醒规则，发送一条测试提醒", view: "settings" });
+      const pendingReminder = (state.events || [])
+        .filter((event) => ["deadline", "video_deadline", "exam_start"].includes(event.kind) && ["pending", "sending"].includes(event.status))
+        .sort((a, b) => (timestamp(a.due_at)?.getTime() || Infinity) - (timestamp(b.due_at)?.getTime() || Infinity))[0];
+      $("first-setup-summary").textContent = pendingReminder
+        ? `每个 DueRadar 账号拥有独立的平台会话、任务和通知设置。下一条提醒：${formatDate(pendingReminder.due_at)}。`
+        : "每个 DueRadar 账号拥有独立的平台会话、任务和通知设置。";
       const list = $("first-setup-steps"); list.replaceChildren();
       steps.forEach((step, index) => { const item = node("li", "setup-card__step"); const button = node("button", "text-button", `${index + 1}. ${step.label} →`); button.type = "button"; button.addEventListener("click", () => changeView(step.view)); item.append(button); list.append(item); });
     }
@@ -646,6 +949,7 @@
         const text = `状态刷新失败：${error.message}。当前显示上次成功读取的数据。`;
         if ($("connection-error").textContent !== text) $("connection-error").textContent = text;
         $("connection-error").hidden = false; $("service-label").textContent = "连接暂时中断"; $("service-dot").classList.add("offline");
+        updateStatusChip();
       }
     };
     job.promise = (async () => {
@@ -732,6 +1036,11 @@
     return [...new Set(parts.map(Number))].sort((a, b) => b - a);
   }
 
+  window.addEventListener("beforeunload", (event) => {
+    if (!hasUnsavedChanges()) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => changeView(button.dataset.view)));
   window.addEventListener("hashchange", () => {
     const hash = location.hash.slice(1);
@@ -744,7 +1053,40 @@
   for (const id of ["platform-filter", "kind-filter", "deadline-filter", "scope-filter"]) $(id).addEventListener("change", () => { taskPage = 1; render(); });
   $("task-prev").addEventListener("click", () => { taskPage--; renderTasks(); $("task-heading").scrollIntoView({ block: "start" }); });
   $("task-next").addEventListener("click", () => { taskPage++; renderTasks(); $("task-heading").scrollIntoView({ block: "start" }); });
-  $("settings-form").addEventListener("input", () => { settingsDirty = true; });
+  $("dismiss-clear").addEventListener("click", () => { dismissSelection.clear(); updateDismissBar(); renderTasks(); });
+  $("dismiss-selected").addEventListener("click", openDismissDialog);
+  $("dismiss-cancel").addEventListener("click", () => $("dismiss-dialog").close());
+  $("dismiss-confirm").addEventListener("click", (event) => busy(event.currentTarget, async () => {
+    const tasks = selectedTasks();
+    $("dismiss-dialog").close();
+    await setTaskDismissed(tasks, true);
+  }));
+  $("task-dialog-close").addEventListener("click", () => $("task-dialog").close());
+  $("user-identity").addEventListener("click", openAccountDialog);
+  $("account-close").addEventListener("click", () => $("account-dialog").close());
+  $("password-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    busy(event.submitter || $("password-form").querySelector("button"), async () => {
+      const currentPassword = $("password-current").value;
+      const newPassword = $("password-new").value;
+      if (newPassword !== $("password-new-confirm").value) throw new Error("两次输入的新密码不一致。");
+      if (newPassword.length < 12) throw new Error("新密码至少需要 12 个字符。");
+      const result = await api("/api/account/password", "POST", { current_password: currentPassword, new_password: newPassword });
+      $("password-form").reset();
+      await loadAccountSessions();
+      notify(result.message || "密码已修改。");
+    });
+  });
+  $("revoke-others").addEventListener("click", (event) => {
+    if (!askConfirm("确定退出所有其他设备吗？它们需要重新输入密码登录。")) return;
+    return busy(event.currentTarget, async () => {
+      const result = await api("/api/account/sessions/revoke-others", "POST", {});
+      await loadAccountSessions();
+      notify(Number(result.removed) ? `已退出 ${result.removed} 个其他会话。` : "没有其他活动会话。");
+    });
+  });
+  $("export-data").addEventListener("click", (event) => downloadExport(event.currentTarget));
+  $("settings-form").addEventListener("input", () => { settingsDirty = true; renderRuleSummary(); });
   $("bark-form").addEventListener("input", () => { barkDirty = true; });
   $("analysis-form").addEventListener("input", () => { analysisDirty = true; });
   $("zhidao-auto-form").addEventListener("input", () => { zhidaoDirty = true; });
@@ -789,12 +1131,15 @@
       if (await refreshState()) notify("AI 配置已保存，未调用模型。");
     });
   });
-  $("analysis-clear").addEventListener("click", (event) => busy(event.currentTarget, async () => {
-    if (!state?.analysis || !state?.runtime || state.demo) return;
-    await api("/api/analysis", "PUT", { model: state.analysis.model, clear_key: true });
-    analysisDirty = false; $("analysis-key").value = "";
-    if (await refreshState()) notify("AI 密钥已移除，不再调用模型。");
-  }));
+  $("analysis-clear").addEventListener("click", (event) => {
+    if (!askConfirm("移除已保存的 Anthropic API Key？AI 分析会停止，直到重新填写。")) return;
+    return busy(event.currentTarget, async () => {
+      if (!state?.analysis || !state?.runtime || state.demo) return;
+      await api("/api/analysis", "PUT", { model: state.analysis.model, clear_key: true });
+      analysisDirty = false; $("analysis-key").value = "";
+      if (await refreshState()) notify("AI 密钥已移除，不再调用模型。");
+    });
+  });
   $("zhidao-auto-form").addEventListener("submit", (event) => {
     event.preventDefault(); busy(event.submitter || $("zhidao-auto-form").querySelector("button[type=submit]"), async () => {
       if (!state?.zhidao || !state?.runtime) throw new Error("请等待知到自动续期状态加载完成后再保存。");
@@ -816,14 +1161,24 @@
     notify(result.message || "正在登录知到，请留意短信。");
     await refreshState();
   }));
-  $("zhidao-auto-clear").addEventListener("click", (event) => busy(event.currentTarget, async () => {
-    if (!state?.zhidao?.configured) return;
-    await api("/api/zhidao/auto-login", "PUT", { clear: true });
-    zhidaoDirty = false;
-    $("zhidao-phone").value = ""; $("zhidao-password").value = ""; $("zhidao-auto-enabled").checked = false;
-    if (await refreshState()) notify("已移除保存的知到手机号和密码。");
-  }));
+  $("zhidao-auto-clear").addEventListener("click", (event) => {
+    if (!askConfirm("移除保存的知到手机号和密码？自动续期将停止。")) return;
+    return busy(event.currentTarget, async () => {
+      if (!state?.zhidao?.configured) return;
+      await api("/api/zhidao/auto-login", "PUT", { clear: true });
+      zhidaoDirty = false;
+      $("zhidao-phone").value = ""; $("zhidao-password").value = ""; $("zhidao-auto-enabled").checked = false;
+      if (await refreshState()) notify("已移除保存的知到手机号和密码。");
+    });
+  });
   $("bark-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/bark/test", "POST"); notify(result.message || "测试通知已发送。"); }));
+  $("reminder-test").addEventListener("click", (event) => busy(event.currentTarget, async () => {
+    if (settingsDirty) throw new Error("请先保存提醒规则，测试通知会按已保存的规则发送。");
+    $("reminder-test-status").textContent = "";
+    const result = await api("/api/reminders/test", "POST", { kind: $("reminder-test-kind").value });
+    $("reminder-test-status").textContent = result.message || "";
+    notify(result.sent ? "测试提醒已发送。" : "当前未发送测试提醒。", !result.sent);
+  }));
   $("in-class-test").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/in-class/test", "POST"); notify(result.message || "测试通知已发送。"); }));
   $("in-class-test-poll").addEventListener("click", (event) => busy(event.currentTarget, async () => { const result = await api("/api/in-class/test", "POST", { kind: "poll" }); notify(result.message || "测试通知已发送。"); }));
   $("settings-defaults").addEventListener("click", () => { populateSettings(defaults); settingsDirty = true; notify("已填入默认值，保存后生效。"); });
@@ -866,5 +1221,8 @@
   document.addEventListener("visibilitychange", () => { if (!document.hidden && authenticated) refreshState(); });
   setInterval(() => { if (authenticated && !document.hidden) refreshState(); }, 30000);
   changeView(location.hash.slice(1), false);
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => { /* offline shell is optional */ });
+  }
   refreshState();
 })();

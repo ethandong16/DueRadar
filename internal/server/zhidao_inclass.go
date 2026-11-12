@@ -60,6 +60,7 @@ func (s *Server) zhidaoInClassInterval() time.Duration {
 
 func (s *Server) runZhidaoInClass(ctx context.Context) {
 	delay := 5 * time.Second
+	failures := 0
 	for {
 		timer := time.NewTimer(delay)
 		select {
@@ -68,8 +69,16 @@ func (s *Server) runZhidaoInClass(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
+		before := s.zhidaoInClassSnapshot().LastCheckAt
 		s.checkZhidaoInClass(ctx)
-		delay = s.zhidaoInClassInterval()
+		if after := s.zhidaoInClassSnapshot(); after.LastCheckAt.After(before) {
+			if after.Error == "" {
+				failures = 0
+			} else {
+				failures++
+			}
+		}
+		delay = classroomPollDelay(s.zhidaoInClassInterval(), failures)
 	}
 }
 

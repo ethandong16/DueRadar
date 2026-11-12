@@ -97,6 +97,16 @@ func (e *Engine) MarkSentClaim(claim Event, now time.Time) error {
 // canceled event stays canceled; failure never exposes the transport message.
 // Repeating the same failure is harmless until another claim is issued.
 func (e *Engine) MarkFailedClaim(claim Event, message string, now time.Time) error {
+	return e.markFailedClaim(claim, message, 0, now)
+}
+
+// MarkFailedClaimAfter honors a transport-provided Retry-After without letting
+// the provider shorten the local backoff.
+func (e *Engine) MarkFailedClaimAfter(claim Event, message string, retryAfter time.Duration, now time.Time) error {
+	return e.markFailedClaim(claim, message, retryAfter, now)
+}
+
+func (e *Engine) markFailedClaim(claim Event, message string, retryAfter time.Duration, now time.Time) error {
 	return e.change(func(s *State) error {
 		ev := claimedEvent(s, claim)
 		if ev == nil {
@@ -115,7 +125,30 @@ func (e *Engine) MarkFailedClaim(claim Event, message string, now time.Time) err
 			ev.ClaimPriorError = ""
 			return nil
 		}
-		markFailed(ev, now)
+		markFailed(ev, now, retryAfter)
+		return nil
+	})
+}
+
+// MarkPermanentFailureClaim records a transport rejection that retrying cannot
+// fix, such as a Bark 4xx. A canceled event keeps its cancellation; otherwise
+// the event becomes failed immediately instead of consuming its retry budget.
+func (e *Engine) MarkPermanentFailureClaim(claim Event, now time.Time) error {
+	return e.change(func(s *State) error {
+		ev := claimedEvent(s, claim)
+		if ev == nil {
+			return ErrStaleClaim
+		}
+		if !unsettledClaim(ev) {
+			return ErrStaleClaim
+		}
+		if ev.Status == "canceled" {
+			ev.ClaimState = claimFailed
+			ev.ClaimUntil = time.Time{}
+			ev.ClaimPriorError = ""
+			return nil
+		}
+		markPermanentFailure(ev)
 		return nil
 	})
 }
@@ -150,6 +183,8 @@ func returnUnsent(ev *Event) {
 	ev.ClaimState = claimReturned
 	ev.ClaimUntil = time.Time{}
 	ev.ClaimPriorError = ""
+	ev.BlockedReason = ""
+	ev.BlockedUntil = nil
 }
 
 func markSent(ev *Event, now time.Time) {
@@ -157,6 +192,9 @@ func markSent(ev *Event, now time.Time) {
 	ev.SentAt = timePtr(now)
 	ev.NextAttemptAt = nil
 	ev.LastError = ""
+	ev.BlockedReason = ""
+	ev.BlockedUntil = nil
+	ev.PermanentFailure = false
 	if ev.ClaimID != 0 {
 		ev.ClaimState = claimSent
 	}
@@ -164,24 +202,53 @@ func markSent(ev *Event, now time.Time) {
 	ev.ClaimPriorError = ""
 }
 
-func markFailed(ev *Event, now time.Time) {
+func markFailed(ev *Event, now time.Time, retryAfter time.Duration) {
 	ev.LastError = "通知发送失败，请检查 Bark 配置及网络"
 	if ev.ClaimID != 0 {
 		ev.ClaimState = claimFailed
 	}
 	ev.ClaimUntil = time.Time{}
 	ev.ClaimPriorError = ""
+	ev.PermanentFailure = false
 	if ev.Attempts >= MaxDeliveryAttempts {
 		ev.Status = "failed"
 		ev.NextAttemptAt = nil
+		ev.BlockedReason = BlockedRetryExhausted
+		ev.BlockedUntil = nil
 		return
 	}
 	delay := time.Minute * time.Duration(1<<uint(ev.Attempts-1))
 	if delay > 30*time.Minute {
 		delay = 30 * time.Minute
 	}
+	if retryAfter > delay {
+		delay = retryAfter
+	}
+	if delay > time.Hour {
+		delay = time.Hour
+	}
 	ev.Status = "pending"
 	ev.NextAttemptAt = timePtr(now.Add(delay))
+	ev.BlockedReason = BlockedRetryBackoff
+	ev.BlockedUntil = cloneTime(ev.NextAttemptAt)
+}
+
+// markPermanentFailure stops retrying an outcome that cannot succeed, such as
+// a Bark 4xx. It remains visible in the activity view and does not consume the
+// remaining transient retry budget.
+func markPermanentFailure(ev *Event) {
+	ev.Status = "failed"
+	ev.LastError = "通知被 Bark 拒绝，请检查服务地址和设备密钥"
+	ev.SentAt = nil
+	ev.NextAttemptAt = nil
+	ev.BlockedReason = BlockedPermanent
+	ev.BlockedUntil = nil
+	ev.PermanentFailure = true
+	if ev.ClaimID != 0 {
+		ev.ClaimState = claimFailed
+	}
+	ev.ClaimUntil = time.Time{}
+	ev.ClaimPriorError = ""
 }
 
 // ClaimStillValidClaim checks ownership, the unexpired lease, and current

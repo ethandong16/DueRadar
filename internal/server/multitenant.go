@@ -49,14 +49,18 @@ type multiUserFile struct {
 }
 
 type multiSession struct {
-	UserID  string
-	Expires time.Time
+	ID        string
+	UserID    string
+	Expires   time.Time
+	CreatedAt time.Time
 }
 
 type multiStoredSession struct {
-	Key     string    `json:"key"`
-	UserID  string    `json:"user_id"`
-	Expires time.Time `json:"expires"`
+	ID        string    `json:"id,omitempty"`
+	Key       string    `json:"key"`
+	UserID    string    `json:"user_id"`
+	Expires   time.Time `json:"expires"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
 type multiSessionFile struct {
@@ -238,7 +242,13 @@ func (m *MultiServer) loadSessions() error {
 			continue
 		}
 		if _, exists := m.users[stored.UserID]; exists {
-			m.sessions[stored.Key] = multiSession{UserID: stored.UserID, Expires: stored.Expires}
+			id := stored.ID
+			if id == "" {
+				// Sessions written before IDs existed remain usable; assign an ID so
+				// the account page can still list and revoke them.
+				id, _ = randomToken(8)
+			}
+			m.sessions[stored.Key] = multiSession{ID: id, UserID: stored.UserID, Expires: stored.Expires, CreatedAt: stored.CreatedAt}
 		}
 	}
 	return nil
@@ -262,7 +272,7 @@ func (m *MultiServer) saveSessionsLocked() error {
 	file := multiSessionFile{Version: 1, Sessions: make([]multiStoredSession, 0, len(m.sessions))}
 	for key, session := range m.sessions {
 		if session.Expires.After(now) {
-			file.Sessions = append(file.Sessions, multiStoredSession{Key: key, UserID: session.UserID, Expires: session.Expires})
+			file.Sessions = append(file.Sessions, multiStoredSession{ID: session.ID, Key: key, UserID: session.UserID, Expires: session.Expires, CreatedAt: session.CreatedAt})
 		}
 	}
 	data, err := json.Marshal(file)
@@ -384,6 +394,17 @@ func (m *MultiServer) Handler(files fs.FS) http.Handler {
 			jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 			return
 		}
+		if r.URL.Path == "/readyz" {
+			m.mu.RLock()
+			stopping := m.stopping
+			m.mu.RUnlock()
+			if stopping {
+				jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"status": "stopping"})
+				return
+			}
+			jsonResponse(w, http.StatusOK, map[string]string{"status": "ready"})
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if !multiMutationAllowed(w, r) {
 				return
@@ -444,6 +465,18 @@ func (m *MultiServer) dispatchAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	case r.Method == http.MethodPost && r.URL.Path == "/api/logout":
 		m.logout(w, r)
+		return
+	case r.Method == http.MethodPost && r.URL.Path == "/api/account/password":
+		m.changePassword(w, r)
+		return
+	case r.Method == http.MethodGet && r.URL.Path == "/api/account/sessions":
+		m.sessionList(w, r)
+		return
+	case r.Method == http.MethodPost && r.URL.Path == "/api/account/sessions/revoke":
+		m.revokeSession(w, r, false)
+		return
+	case r.Method == http.MethodPost && r.URL.Path == "/api/account/sessions/revoke-others":
+		m.revokeSession(w, r, true)
 		return
 	case r.URL.Path == "/api/":
 		fail(w, http.StatusNotFound, "接口不存在")
@@ -814,6 +847,10 @@ func (m *MultiServer) createSessionLocked(userID string, now time.Time) (string,
 	if err != nil {
 		return "", err
 	}
+	id, err := randomToken(8)
+	if err != nil {
+		return "", err
+	}
 	for key, session := range m.sessions {
 		if !session.Expires.After(now) {
 			delete(m.sessions, key)
@@ -829,7 +866,7 @@ func (m *MultiServer) createSessionLocked(userID string, now time.Time) (string,
 		}
 		delete(m.sessions, oldestKey)
 	}
-	m.sessions[multiSessionKey(token)] = multiSession{UserID: userID, Expires: now.Add(multiSessionLifetime)}
+	m.sessions[multiSessionKey(token)] = multiSession{ID: id, UserID: userID, Expires: now.Add(multiSessionLifetime), CreatedAt: now.UTC()}
 	if err := m.saveSessionsLocked(); err != nil {
 		delete(m.sessions, multiSessionKey(token))
 		return "", err
@@ -865,6 +902,197 @@ func (m *MultiServer) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	setMultiSessionCookie(w, "", m.secureCookies)
 	jsonResponse(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (m *MultiServer) changePassword(w http.ResponseWriter, r *http.Request) {
+	userID, ok := m.authenticatedUser(r)
+	if !ok {
+		fail(w, http.StatusUnauthorized, "请先登录 DueRadar 账号")
+		return
+	}
+	var input struct {
+		Current string `json:"current_password"`
+		New     string `json:"new_password"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	if len(input.New) < 12 || len(input.New) > maxPasswordBytes {
+		fail(w, http.StatusBadRequest, "新密码长度需要为 12—1024 字节")
+		return
+	}
+	if input.New == input.Current {
+		fail(w, http.StatusBadRequest, "新密码不能与当前密码相同")
+		return
+	}
+	ip := clientIP(r)
+	m.mu.Lock()
+	allowed := m.allowLoginAttemptLocked(ip, time.Now())
+	m.mu.Unlock()
+	if !allowed {
+		w.Header().Set("Retry-After", "2")
+		fail(w, http.StatusTooManyRequests, "密码尝试过于频繁，请稍后重试")
+		return
+	}
+	m.mu.RLock()
+	user, exists := m.users[userID]
+	m.mu.RUnlock()
+	if !exists {
+		fail(w, http.StatusUnauthorized, "账号不存在，请重新登录")
+		return
+	}
+	if !m.acquirePasswordSlot(w) {
+		return
+	}
+	verified := user.PasswordHash
+	valid := verifyPassword(verified, input.Current)
+	<-m.passwordSlots
+	if !valid {
+		m.mu.Lock()
+		limited := !m.recordLoginFailureLocked(ip, time.Now())
+		m.mu.Unlock()
+		if limited {
+			w.Header().Set("Retry-After", "2")
+			fail(w, http.StatusTooManyRequests, "密码尝试过于频繁，请稍后重试")
+		} else {
+			fail(w, http.StatusForbidden, "当前密码不正确")
+		}
+		return
+	}
+	if !m.acquirePasswordSlot(w) {
+		return
+	}
+	hash, hashErr := hashPassword(input.New)
+	<-m.passwordSlots
+	if hashErr != nil {
+		fail(w, http.StatusInternalServerError, "密码修改失败")
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	if m.stopping {
+		m.mu.Unlock()
+		fail(w, http.StatusServiceUnavailable, "服务正在停止")
+		return
+	}
+	user, exists = m.users[userID]
+	if !exists {
+		m.mu.Unlock()
+		fail(w, http.StatusUnauthorized, "账号不存在，请重新登录")
+		return
+	}
+	if user.PasswordHash != verified {
+		m.mu.Unlock()
+		fail(w, http.StatusConflict, "密码已在其他会话修改，请重新登录")
+		return
+	}
+	previous := user.PasswordHash
+	user.PasswordHash = hash
+	m.users[userID] = user
+	if err := m.saveUsersLocked(); err != nil {
+		user.PasswordHash = previous
+		m.users[userID] = user
+		m.mu.Unlock()
+		fail(w, http.StatusInternalServerError, "密码保存失败，请检查数据目录")
+		return
+	}
+	delete(m.attempts, ip)
+	// A password change invalidates every other login. Issue a fresh session for
+	// the browser that made the change so the user is not signed out here.
+	for key, session := range m.sessions {
+		if session.UserID == userID {
+			delete(m.sessions, key)
+		}
+	}
+	token, sessionErr := m.createSessionLocked(userID, now)
+	m.mu.Unlock()
+	if sessionErr != nil {
+		fail(w, http.StatusInternalServerError, "密码已修改，请重新登录")
+		return
+	}
+	setMultiSessionCookie(w, token, m.secureCookies)
+	jsonResponse(w, http.StatusOK, map[string]string{"message": "密码已修改，其他设备已退出登录。"})
+}
+
+func (m *MultiServer) sessionList(w http.ResponseWriter, r *http.Request) {
+	userID, ok := m.authenticatedUser(r)
+	if !ok {
+		fail(w, http.StatusUnauthorized, "请先登录 DueRadar 账号")
+		return
+	}
+	current := ""
+	if cookie, err := r.Cookie("dueradar_session"); err == nil {
+		current = multiSessionKey(cookie.Value)
+	}
+	now := time.Now()
+	type view struct {
+		ID        string    `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		ExpiresAt time.Time `json:"expires_at"`
+		Current   bool      `json:"current"`
+	}
+	m.mu.Lock()
+	views := []view{}
+	for key, session := range m.sessions {
+		if !session.Expires.After(now) {
+			delete(m.sessions, key)
+			continue
+		}
+		if session.UserID != userID {
+			continue
+		}
+		views = append(views, view{ID: session.ID, CreatedAt: session.CreatedAt, ExpiresAt: session.Expires, Current: key == current})
+	}
+	m.mu.Unlock()
+	sort.SliceStable(views, func(i, j int) bool {
+		if views[i].CreatedAt.Equal(views[j].CreatedAt) {
+			return views[i].ExpiresAt.After(views[j].ExpiresAt)
+		}
+		return views[i].CreatedAt.After(views[j].CreatedAt)
+	})
+	jsonResponse(w, http.StatusOK, views)
+}
+
+// revokeSession removes one session ID, or every other session when all is
+// true. The browser making the request keeps its own login.
+func (m *MultiServer) revokeSession(w http.ResponseWriter, r *http.Request, all bool) {
+	userID, ok := m.authenticatedUser(r)
+	if !ok {
+		fail(w, http.StatusUnauthorized, "请先登录 DueRadar 账号")
+		return
+	}
+	var input struct {
+		ID string `json:"id"`
+	}
+	if !all && !decode(w, r, &input) {
+		return
+	}
+	current := ""
+	if cookie, err := r.Cookie("dueradar_session"); err == nil {
+		current = multiSessionKey(cookie.Value)
+	}
+	m.mu.Lock()
+	removed := 0
+	for key, session := range m.sessions {
+		if session.UserID != userID || key == current {
+			continue
+		}
+		if all || session.ID == input.ID {
+			delete(m.sessions, key)
+			removed++
+		}
+	}
+	persistErr := m.saveSessionsLocked()
+	m.mu.Unlock()
+	if persistErr != nil {
+		fail(w, http.StatusInternalServerError, "会话保存失败，请检查数据目录")
+		return
+	}
+	if !all && removed == 0 {
+		fail(w, http.StatusNotFound, "会话不存在或已退出")
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"removed": removed})
 }
 
 func setMultiSessionCookie(w http.ResponseWriter, token string, secure bool) {

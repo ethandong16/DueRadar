@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,21 @@ import (
 const MaxDeliveryAttempts = 6
 const FreshnessLimit = 30 * time.Minute
 const deliveryLease = 2 * time.Minute
+
+// BlockedReason values are stable identifiers consumed by the activity view.
+// They answer "why is this reminder still pending?" without exposing provider
+// errors or internal state names.
+const (
+	BlockedWaitingSync    = "waiting_sync"
+	BlockedSyncFailed     = "sync_failed"
+	BlockedNeedsLogin     = "needs_login"
+	BlockedStaleSync      = "stale_sync"
+	BlockedQuietHours     = "quiet_hours"
+	BlockedRetryBackoff   = "retry_backoff"
+	BlockedRetryExhausted = "retry_exhausted"
+	BlockedPermanent      = "permanent"
+	BlockedMissed         = "missed"
+)
 
 // EventRetention bounds terminal notification history. Pending and sending
 // events are always kept; a half-year window still covers a full semester and
@@ -96,6 +112,55 @@ func IsQuiet(s Settings, now time.Time) bool {
 		return minute >= start && minute < end
 	}
 	return minute >= start || minute < end
+}
+
+// quietResumeAt returns the next wall-clock instant at which the current quiet
+// window ends, or nil when ordinary reminders are allowed now. It lets the
+// activity view say "静默延后至 08:00" instead of leaving a pending event
+// unexplained.
+func quietResumeAt(s Settings, now time.Time) *time.Time {
+	if !IsQuiet(s, now) {
+		return nil
+	}
+	loc, err := time.LoadLocation(s.Timezone)
+	if err != nil {
+		return nil
+	}
+	start, err := clockMinute(s.QuietStart)
+	if err != nil {
+		return nil
+	}
+	end, err := clockMinute(s.QuietEnd)
+	if err != nil {
+		return nil
+	}
+	local := now.In(loc)
+	minute := local.Hour()*60 + local.Minute()
+	at := func(day time.Time, minute int) time.Time {
+		return time.Date(day.Year(), day.Month(), day.Day(), minute/60, minute%60, 0, 0, loc)
+	}
+	if start < end {
+		// The window cannot wrap midnight here, so it ends later today.
+		resume := at(local, end)
+		return &resume
+	}
+	if minute >= start {
+		// Started today and ends tomorrow morning.
+		resume := at(local.AddDate(0, 0, 1), end)
+		return &resume
+	}
+	// Started yesterday and ends later today.
+	resume := at(local, end)
+	return &resume
+}
+
+func setBlocked(ev *Event, reason string, until *time.Time) bool {
+	if ev.BlockedReason == reason && sameTime(ev.BlockedUntil, until) {
+		return false
+	}
+	ev.BlockedReason = reason
+	ev.BlockedUntil = cloneTime(until)
+	return true
 }
 
 func (e *Engine) UpdateSettings(settings Settings) error {
@@ -302,6 +367,50 @@ func (e *Engine) RequireRevalidation() error {
 	})
 }
 
+// SetTaskDismissed stops or restores reminders for one task without changing
+// the platform-reported status. Dismissal is only allowed for a task whose
+// deadline has already passed: the user is acknowledging that the platform can
+// no longer accept a submission. If a later sync shows an extended future
+// deadline, Sync clears the dismissal so reminders resume automatically.
+func (e *Engine) SetTaskDismissed(platform, id string, dismissed bool, now time.Time) error {
+	if !validPlatform(platform) {
+		return errors.New("unknown platform")
+	}
+	if strings.TrimSpace(id) == "" {
+		return errors.New("task id is required")
+	}
+	return e.change(func(s *State) error {
+		for i := range s.Tasks {
+			t := &s.Tasks[i]
+			if t.Platform != platform || t.ID != id {
+				continue
+			}
+			if !dismissed {
+				if t.DismissedAt == nil {
+					return nil
+				}
+				t.DismissedAt = nil
+				schedule(s, *t, now)
+				return nil
+			}
+			if t.DismissedAt != nil {
+				return nil
+			}
+			if t.Status != "pending" {
+				return errors.New("只能忽略仍未完成且已过截止的任务")
+			}
+			if t.EndAt == nil || t.EndAt.After(now) {
+				return errors.New("只能忽略已过截止且无法提交的任务")
+			}
+			at := now
+			t.DismissedAt = &at
+			invalidateTask(s, platform, id, "已在 DueRadar 中忽略此任务")
+			return nil
+		}
+		return errors.New("任务不存在")
+	})
+}
+
 func (e *Engine) Sync(platform string, tasks []Task, now time.Time) error {
 	if !validPlatform(platform) {
 		return errors.New("unknown platform")
@@ -351,6 +460,13 @@ func (e *Engine) Sync(platform string, tasks []Task, now time.Time) error {
 			}
 			if i, exists := byID[incoming.ID]; exists {
 				old := s.Tasks[i]
+				incoming.DismissedAt = cloneTime(old.DismissedAt)
+				// A teacher extending the deadline makes an overdue task
+				// actionable again. Clear the local dismissal so reminders can
+				// resume; the user can dismiss it again if needed.
+				if incoming.DismissedAt != nil && incoming.Status == "pending" && incoming.EndAt != nil && incoming.EndAt.After(now) {
+					incoming.DismissedAt = nil
+				}
 				s.Tasks[i] = incoming
 				changed := !sameTime(old.StartAt, incoming.StartAt) || !sameTime(old.EndAt, incoming.EndAt)
 				if changed || old.Kind != incoming.Kind || incoming.Status != "pending" {
@@ -388,6 +504,7 @@ func (e *Engine) Sync(platform string, tasks []Task, now time.Time) error {
 		a.LoginState = "logged_in"
 		a.SyncState = "success"
 		a.LastSuccessAt = timePtr(now)
+		a.LastAttemptAt = timePtr(now)
 		a.ConsecutiveFailures = 0
 		a.LastError = ""
 		a.NeedsRevalidation = false
@@ -423,6 +540,7 @@ func (e *Engine) Fail(platform string, expired bool, message string, now time.Ti
 			a.NeedsRevalidation = true
 		}
 		a.SyncState = "error"
+		a.LastAttemptAt = timePtr(now)
 		// Provider errors can contain signed URLs and credentials. Durable state
 		// deliberately records only a classified, fixed diagnostic.
 		_ = message
@@ -440,7 +558,9 @@ func (e *Engine) Fail(platform string, expired bool, message string, now time.Ti
 }
 
 func taskPending(t Task, now time.Time) bool {
-	return !t.Historical && t.Status == "pending" && (t.EndAt == nil || t.EndAt.After(now))
+	// A locally dismissed task keeps its platform status but stops producing
+	// reminders. It stays visible under the explicit "已忽略" filter only.
+	return !t.Historical && t.DismissedAt == nil && t.Status == "pending" && (t.EndAt == nil || t.EndAt.After(now))
 }
 func timePtr(t time.Time) *time.Time { return &t }
 func sameTime(a, b *time.Time) bool {
@@ -464,6 +584,9 @@ func cancel(e *Event, reason string) {
 	e.Status = "canceled"
 	e.LastError = reason
 	e.NextAttemptAt = nil
+	e.BlockedReason = ""
+	e.BlockedUntil = nil
+	e.PermanentFailure = false
 }
 func invalidateTask(s *State, p, id, reason string) {
 	for i := range s.Events {
@@ -505,12 +628,7 @@ func offsetsFor(s Settings, kind string) []int {
 	}
 }
 func offsetConfigured(s Settings, ev Event) bool {
-	for _, n := range offsetsFor(s, ev.Kind) {
-		if n == ev.MinutesBefore {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(offsetsFor(s, ev.Kind), ev.MinutesBefore)
 }
 
 func taskBody(t Task, s Settings) string {
@@ -598,6 +716,44 @@ func eventValid(s *State, ev Event, now time.Time) bool {
 	return false
 }
 
+// collapseDueTaskEvents prevents a backlog (a long quiet window, a short sleep,
+// or a first sync that lands on a deadline) from sending several versions of
+// the same task reminder back to back. A serial sender keeps only the most
+// specific, most recent due event per task; future reminders are untouched.
+func collapseDueTaskEvents(s *State, now time.Time) bool {
+	type groupKey struct{ platform, task string }
+	best := map[groupKey]int{}
+	changed := false
+	for i := range s.Events {
+		ev := &s.Events[i]
+		if ev.Status != "pending" || ev.TaskID == "" || ev.DueAt.After(now) || !eventValid(s, *ev, now) {
+			continue
+		}
+		if ev.Kind != "deadline" && ev.Kind != "video_deadline" && ev.Kind != "exam_start" && ev.Kind != "new_task" && ev.Kind != "time_changed" {
+			continue
+		}
+		key := groupKey{ev.Platform, ev.TaskID}
+		index, exists := best[key]
+		if !exists {
+			best[key] = i
+			continue
+		}
+		current := &s.Events[index]
+		// Prefer a scheduled reminder over a discovery/time-change event; on
+		// equal footing, the latest due time is the most useful message.
+		replace := scheduled(ev.Kind) && !scheduled(current.Kind) ||
+			scheduled(ev.Kind) == scheduled(current.Kind) && ev.DueAt.After(current.DueAt)
+		if replace {
+			cancel(current, "已合并为更近的一条提醒")
+			best[key] = i
+		} else {
+			cancel(ev, "已合并为更近的一条提醒")
+		}
+		changed = true
+	}
+	return changed
+}
+
 func collapseRecovery(s *State, p string, now time.Time) {
 	latest := map[string]int{}
 	for i := range s.Events {
@@ -653,6 +809,12 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 	defer e.mu.Unlock()
 	s := cloneState(e.state)
 	changed := false
+	// The serial sender never needs two reminders for the same task in one
+	// backlog. Keep the most specific one and cancel the rest so a quiet-hours
+	// release or a clock jump cannot produce a notification burst.
+	if limit == 1 && collapseDueTaskEvents(&s, now) {
+		changed = true
+	}
 	result := []Event{}
 	indices := make([]int, len(s.Events))
 	for i := range indices {
@@ -665,11 +827,21 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 			continue
 		}
 		if !eventValid(&s, *ev, now) {
-			cancel(ev, "event expired or no longer valid")
+			cancel(ev, "已错过：任务已截止、已完成或状态已变化")
+			ev.BlockedReason = BlockedMissed
 			changed = true
 			continue
 		}
-		if ev.DueAt.After(now) || ev.NextAttemptAt != nil && ev.NextAttemptAt.After(now) {
+		if ev.DueAt.After(now) {
+			if setBlocked(ev, "", nil) {
+				changed = true
+			}
+			continue
+		}
+		if ev.NextAttemptAt != nil && ev.NextAttemptAt.After(now) {
+			if setBlocked(ev, BlockedRetryBackoff, ev.NextAttemptAt) {
+				changed = true
+			}
 			continue
 		}
 		if ev.Attempts >= MaxDeliveryAttempts {
@@ -681,11 +853,14 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 			}
 			ev.Status = "failed"
 			ev.LastError = "通知发送达到重试上限"
+			ev.BlockedReason = BlockedRetryExhausted
+			ev.BlockedUntil = nil
 			changed = true
 			continue
 		}
 		if ev.Kind != "fault" {
 			fresh := false
+			reason := BlockedWaitingSync
 			for _, a := range s.Accounts {
 				if a.Platform == ev.Platform {
 					if ev.Kind == "in_class" || ev.Kind == "rain_analysis" {
@@ -693,17 +868,34 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 						// so a full 15-minute task sync is not required. A login
 						// that needs revalidation still blocks delivery.
 						fresh = !a.NeedsRevalidation
+						if a.NeedsRevalidation {
+							reason = BlockedNeedsLogin
+						}
+					} else if a.NeedsRevalidation {
+						reason = BlockedNeedsLogin
+					} else if a.SyncState != "success" {
+						reason = BlockedSyncFailed
+					} else if a.LastSuccessAt == nil {
+						reason = BlockedWaitingSync
+					} else if now.Sub(*a.LastSuccessAt) > FreshnessLimit {
+						reason = BlockedStaleSync
 					} else {
-						fresh = !a.NeedsRevalidation && a.SyncState == "success" && a.LastSuccessAt != nil && now.Sub(*a.LastSuccessAt) <= FreshnessLimit
+						fresh = true
 					}
 					break
 				}
 			}
 			if !fresh {
+				if setBlocked(ev, reason, nil) {
+					changed = true
+				}
 				continue
 			}
 		}
 		if IsQuiet(s.Settings, now) && !urgentEvent(*ev) {
+			if setBlocked(ev, BlockedQuietHours, quietResumeAt(s.Settings, now)) {
+				changed = true
+			}
 			continue
 		}
 		// Keep event identity and due time stable while sending the latest task
@@ -734,6 +926,9 @@ func (e *Engine) pendingWithLimit(now time.Time, limit int) ([]Event, error) {
 		ev.ClaimState = claimActive
 		ev.ClaimPriorError = ""
 		ev.Status = "sending"
+		ev.BlockedReason = ""
+		ev.BlockedUntil = nil
+		ev.PermanentFailure = false
 		ev.Attempts++
 		ev.NextAttemptAt = timePtr(now.Add(deliveryLease))
 		// Keep a separate immutable copy after cancellation clears the retry
@@ -803,7 +998,7 @@ func (e *Engine) MarkFailed(id string, message string, now time.Time) error {
 					return errors.New("event is not claimed")
 				}
 				_ = message // External transport errors may contain the private Bark key.
-				markFailed(ev, now)
+				markFailed(ev, now, 0)
 				return nil
 			}
 		}

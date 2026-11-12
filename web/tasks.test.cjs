@@ -9,9 +9,15 @@ const fixture = [
   { id:"done", status:"completed", kind:"homework", platform:"rain", title:"Submitted", due_at:"2026-10-24T00:00:00+08:00" },
   { id:"unknown", status:"unknown", kind:"exam", platform:"rain", title:"Unknown", due_at:"invalid" },
 ];
-test("active upcoming work precedes old overdue work without changing platform status", () => {
-  assert.deepEqual(select(fixture, {now}).map(t=>t.id), ["future","video","unknown","old","done"]);
+test("overdue work comes first, then upcoming work without changing platform status", () => {
+  assert.deepEqual(select(fixture, {now}).map(t=>t.id), ["old","future","video","unknown","done"]);
   assert.equal(fixture[0].status,"pending");
+});
+test("dismissed tasks stay hidden unless the explicit filter is selected", () => {
+  const dismissed = [{...fixture[0], dismissed_at:"2026-10-01T00:00:00+08:00"}, ...fixture.slice(1)];
+  assert.deepEqual(select(dismissed,{now}).map(t=>t.id), ["future","video","unknown","done"]);
+  assert.deepEqual(select(dismissed,{now,dismissed:"only"}).map(t=>t.id), ["old"]);
+  assert.deepEqual(select(dismissed,{now,dismissed:"include"}).map(t=>t.id), ["old","future","video","unknown","done"]);
 });
 test("all filters compose and missing or invalid deadlines remain unknown", () => {
   assert.deepEqual(select(fixture, {now,status:"pending",kind:"video",timing:"no_due",query:"智慧",platformLabel:()=>"智慧树"}).map(t=>t.id), ["video"]);

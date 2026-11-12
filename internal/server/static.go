@@ -29,6 +29,9 @@ func staticHandler(files fs.FS) http.Handler {
 		"tasks.js":   "text/javascript; charset=utf-8",
 		"theme.js":   "text/javascript; charset=utf-8",
 		"style.css":  "text/css; charset=utf-8",
+		"sw.js":      "text/javascript; charset=utf-8",
+		"manifest.webmanifest": "application/manifest+json",
+		"icon.svg":   "image/svg+xml",
 	} {
 		body, err := fs.ReadFile(files, name)
 		if err != nil {
